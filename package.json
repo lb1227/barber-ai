@@ -8,6 +8,7 @@
     "dotenv": "^16.4.5",
     "express": "^5.1.0",
     "twilio": "^4.22.0",
-    "better-sqlite3": "^9.6.0"
+    "better-sqlite3": "^9.6.0",
+    "openai": "^4.58.0"
   }
 }
