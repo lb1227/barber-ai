@@ -1,96 +1,79 @@
-import db from "./database.js";
-import "dotenv/config";
-import express from "express";
+// ===== Conversational voice assistant =====
+import fetch from "node-fetch"; // if not already available in your Node runtime
 
-const app = express();
+// A tiny in-memory state per active call (good enough for MVP)
+const callSessions = new Map();
 
-// Twilio sends form-encoded bodies for <Gather> results
-app.use(express.urlencoded({ extended: false }));
-app.use(express.json());
-
-// ---- safety: ensure OPENAI_API_KEY is present ----
-if (!process.env.OPENAI_API_KEY) {
-  console.error("❌ OPENAI_API_KEY is missing! Set it in Render > Environment.");
-  process.exit(1);
-}
-
-// ------------ helpers ------------
-function twimlSayGather(message, { action = "/voice/handle", bargeIn = true } = {}) {
-  // Ask a question and keep the mic open to capture speech
+// Unified helper to return TwiML with a natural voice & speech gather
+function sayAndListen({ text, action = "/voice/handle", loop = 1 }) {
+  // SSML inside <Say> works best with Polly neural voices
+  // You can try: Polly.Joanna-Neural, Polly.Matthew-Neural, Polly.Ruth-Neural, etc.
   return `
     <Response>
-      <Gather input="speech" action="${action}" method="POST"
-              language="en-US" speechTimeout="auto" profanityFilter="false"
-              enhanced="true" bargeIn="${bargeIn}">
-        <Say voice="alice">${xmlEscape(message)}</Say>
+      <Gather 
+        input="speech"
+        action="${action}"
+        method="POST"
+        enhanced="true"
+        language="en-US"
+        speechTimeout="auto"
+        bargeIn="true"
+        hints="book,cancel,reschedule,appointment,hours,${["John","Mike","Sarah"].join(",")}"
+      >
+        <Say voice="Polly.Joanna-Neural">
+          <speak>
+            <prosody rate="medium" pitch="+2%">
+              ${text}
+            </prosody>
+          </speak>
+        </Say>
       </Gather>
-      <Say voice="alice">I didn't catch that. Let me try again.</Say>
-      <Redirect method="POST">${action}</Redirect>
+      <!-- If caller stays silent, gently reprompt once -->
+      <Say loop="${loop}" voice="Polly.Joanna-Neural">
+        <speak>
+          <prosody rate="medium" pitch="+2%">
+            I didn't catch that. Please say something like book, cancel, or reschedule an appointment.
+          </prosody>
+        </speak>
+      </Say>
+      <Redirect method="POST">/voice</Redirect>
     </Response>
   `.trim();
 }
 
-function twimlSay(message) {
-  return `
-    <Response>
-      <Say voice="alice">${xmlEscape(message)}</Say>
-      <Hangup/>
-    </Response>
-  `.trim();
-}
+// First response when a call arrives
+app.post("/voice", (req, res) => {
+  const callSid = req.body.CallSid || "no-sid";
+  // Initialize/reset a session for this call
+  callSessions.set(callSid, { stage: "start", intent: null, slots: {} });
+  const welcome =
+    "Hello! This is the barber shop. How can I help you today? You can say things like, book an appointment, reschedule, cancel, or ask our hours.";
+  res.type("text/xml").send(sayAndListen({ text: welcome }));
+});
 
-function xmlEscape(s = "") {
-  return String(s)
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
+// Helper: call OpenAI to interpret the user's utterance
+async function interpretUtterance(utterance) {
+  const sys = `
+You are a concise call receptionist for a barber shop. 
+Extract intent and any details as JSON ONLY (no extra text). 
+Valid intents: "book", "cancel", "reschedule", "hours", "greeting", "goodbye", "unknown".
+Fields: 
+- "name" (string, optional)
+- "phone" (string, optional)
+- "datetime" (ISO-ish or natural like "tomorrow 2pm")
+- "barber" (string, optional)
+Return: {"intent":"...", "name":"...", "phone":"...", "datetime":"...", "barber":"..."}.
+If anything is missing, keep fields empty.
+`.trim();
 
-// Simple in-memory per-call state
-const sessions = new Map(); // key = CallSid, value = {intent, name, phone, time, barber}
-
-// Call OpenAI to extract an intent + fields from user text
-async function extractIntentAndSlots(userText) {
-  const system = `
-You are a call assistant for a barber shop. Extract structured info from the user's sentence.
-Return ONLY JSON with this schema:
-{
-  "intent": "book" | "reschedule" | "cancel" | "hours" | "greet" | "agent" | "unknown",
-  "customer_name": string | null,
-  "phone_number": string | null,
-  "appointment_time": string | null, // ISO-ish or natural text like "next Thursday 3pm"
-  "barber": string | null
-}
-- Map small talk like "hi"/"hello" to intent "greet".
-- If they ask to speak to a person, use "agent".
-- Be liberal: recognize "book me", "set me up", "move it", "change it", etc.
-- If anything is missing, set that field to null.
-`;
-
-  const body = {
+  const payload = {
     model: "gpt-4o-mini",
-    response_format: {
-      type: "json_schema",
-      json_schema: {
-        name: "intent",
-        schema: {
-          type: "object",
-          additionalProperties: false,
-          properties: {
-            intent: { type: "string", enum: ["book", "reschedule", "cancel", "hours", "greet", "agent", "unknown"] },
-            customer_name: { type: ["string", "null"] },
-            phone_number: { type: ["string", "null"] },
-            appointment_time: { type: ["string", "null"] },
-            barber: { type: ["string", "null"] }
-          },
-          required: ["intent", "customer_name", "phone_number", "appointment_time", "barber"]
-        }
-      }
-    },
     messages: [
-      { role: "system", content: system },
-      { role: "user", content: userText || "" }
-    ]
+      { role: "system", content: sys },
+      { role: "user", content: utterance || "" },
+    ],
+    temperature: 0.2,
+    response_format: { type: "json_object" },
   };
 
   const r = await fetch("https://api.openai.com/v1/chat/completions", {
@@ -99,230 +82,131 @@ Return ONLY JSON with this schema:
       "Authorization": `Bearer ${process.env.OPENAI_API_KEY}`,
       "Content-Type": "application/json",
     },
-    body: JSON.stringify(body)
+    body: JSON.stringify(payload),
   });
 
-  if (!r.ok) {
-    const errText = await r.text();
-    console.error("OpenAI error:", r.status, errText);
-    return { intent: "unknown", customer_name: null, phone_number: null, appointment_time: null, barber: null };
+  const j = await r.json();
+  let data = {};
+  try {
+    data = JSON.parse(j.choices?.[0]?.message?.content || "{}");
+  } catch (_) {
+    data = {};
+  }
+  return {
+    intent: data.intent || "unknown",
+    name: data.name || "",
+    phone: data.phone || "",
+    datetime: data.datetime || "",
+    barber: data.barber || "",
+  };
+}
+
+// Slot-filling utility: check what we still need for an operation
+function missingFor(intent, slots) {
+  const needs = [];
+  if (intent === "book") {
+    if (!slots.datetime) needs.push("datetime");
+    if (!slots.name) needs.push("name");
+    // optional: phone, barber
+  }
+  if (intent === "reschedule") {
+    if (!slots.id && !slots.phone) needs.push("id_or_phone");
+    if (!slots.datetime) needs.push("datetime");
+  }
+  if (intent === "cancel") {
+    if (!slots.id && !slots.phone) needs.push("id_or_phone");
+  }
+  return needs;
+}
+
+// Turn user speech into next system prompt + do DB if complete
+async function handleIntent(session, text) {
+  const parsed = await interpretUtterance(text);
+  // Merge slots
+  session.intent = session.intent || parsed.intent;
+  session.slots = { ...session.slots, ...parsed };
+
+  // Normalize trivial intents
+  if (session.intent === "greeting") return { reply: "Hi there! What can I do for you today?" };
+  if (session.intent === "hours") {
+    return { reply: "We are open Tuesday through Saturday from 9 AM to 6 PM. Would you like to book an appointment?" };
+  }
+  if (session.intent === "goodbye") return { reply: "Thanks for calling. Have a great day!" };
+  if (!["book","cancel","reschedule","hours","goodbye"].includes(session.intent)) {
+    return { reply: "I can help you book, cancel, or reschedule. What would you like to do?" };
   }
 
-  const data = await r.json();
-  const json = safeParseJSON(data?.choices?.[0]?.message?.content);
-  return json || { intent: "unknown", customer_name: null, phone_number: null, appointment_time: null, barber: null };
+  // Ask for missing info
+  const needs = missingFor(session.intent, session.slots);
+  if (needs.length) {
+    if (needs.includes("datetime")) return { reply: "What day and time would you like?" };
+    if (needs.includes("name")) return { reply: "What name should I put the appointment under?" };
+    if (needs.includes("id_or_phone")) return { reply: "Please say your appointment ID, or the phone number on the appointment." };
+  }
+
+  // If we reach here, we have enough to act
+  try {
+    if (session.intent === "book") {
+      // Create appointment
+      const stmt = db.prepare(
+        "INSERT INTO appointments (customer_name, phone_number, appointment_time) VALUES (?, ?, ?)"
+      );
+      stmt.run(session.slots.name || "Walk-in", session.slots.phone || "", session.slots.datetime);
+      return { reply: `All set. I booked ${session.slots.name || "your"} appointment for ${session.slots.datetime}. Anything else?` };
+    }
+
+    if (session.intent === "reschedule") {
+      // Simple reschedule by phone (or you can require ID)
+      if (session.slots.id) {
+        const up = db.prepare("UPDATE appointments SET appointment_time = ? WHERE id = ?");
+        const info = up.run(session.slots.datetime, Number(session.slots.id));
+        if (info.changes) return { reply: `Done. Your appointment is now ${session.slots.datetime}. Anything else?` };
+        return { reply: "I couldn't find that appointment ID. Would you like to try a phone number instead?" };
+      } else {
+        const row = db.prepare("SELECT id FROM appointments WHERE phone_number = ? ORDER BY id DESC").get(session.slots.phone || "");
+        if (!row) return { reply: "I couldn't find an appointment under that phone number. Would you like to try the appointment ID?" };
+        const up = db.prepare("UPDATE appointments SET appointment_time = ? WHERE id = ?");
+        up.run(session.slots.datetime, row.id);
+        return { reply: `Done. Your appointment is now ${session.slots.datetime}. Anything else?` };
+      }
+    }
+
+    if (session.intent === "cancel") {
+      if (session.slots.id) {
+        const del = db.prepare("DELETE FROM appointments WHERE id = ?");
+        const info = del.run(Number(session.slots.id));
+        if (info.changes) return { reply: "Your appointment has been canceled. Anything else I can help with?" };
+        return { reply: "I couldn't find that appointment ID. Would you like to try a phone number instead?" };
+      } else {
+        const row = db.prepare("SELECT id FROM appointments WHERE phone_number = ? ORDER BY id DESC").get(session.slots.phone || "");
+        if (!row) return { reply: "I couldn't find an appointment under that phone number. Would you like to try the appointment ID?" };
+        const del = db.prepare("DELETE FROM appointments WHERE id = ?");
+        del.run(row.id);
+        return { reply: "Your appointment has been canceled. Anything else I can help with?" };
+      }
+    }
+
+    return { reply: "Okay. What would you like to do next?" };
+  } catch (e) {
+    console.error("DB error:", e);
+    return { reply: "Sorry, I had a problem saving that. Could you try again?" };
+  }
 }
 
-function safeParseJSON(s) {
-  try { return JSON.parse(s); } catch { return null; }
-}
-
-// Normalize phone (very light)
-function normalizePhone(p) {
-  if (!p) return null;
-  const digits = p.replace(/\D/g, "");
-  if (digits.length === 10) return digits;       // US local
-  if (digits.length === 11 && digits.startsWith("1")) return digits.slice(1);
-  return digits || null;
-}
-
-// ------------- VOICE BOT ROUTES -------------
-
-// Entry point Twilio calls on inbound call
-app.post("/voice", (req, res) => {
-  const callSid = req.body.CallSid || Math.random().toString(36).slice(2);
-  sessions.set(callSid, sessions.get(callSid) || {});
-
-  // Friendly greeting + open mic
-  const msg = `Hello! This is the barber shop. How can I help you today?
-You can say things like: "Book me for Friday at 3 pm", "Reschedule my appointment", "Cancel my appointment", or "What are your hours?"`;
-  res.type("text/xml").send(twimlSayGather(msg, { action: "/voice/handle" }));
-});
-
-// Handles speech turn
 app.post("/voice/handle", async (req, res) => {
-  const callSid = req.body.CallSid || "missing";
-  const speech = (req.body.SpeechResult || "").trim();
-  const session = sessions.get(callSid) || {};
+  const callSid = req.body.CallSid || "no-sid";
+  const session = callSessions.get(callSid) || { stage: "start", intent: null, slots: {} };
 
-  // If Twilio sent nothing, reprompt
+  const speech = (req.body.SpeechResult || "").trim();
   if (!speech) {
     return res.type("text/xml").send(
-      twimlSayGather("Sorry — I didn’t catch that. How can I help?")
+      sayAndListen({ text: "Sorry, I didn't hear anything. What can I help you with?" })
     );
   }
 
-  // First, try to interpret what they said
-  const nlp = await extractIntentAndSlots(speech);
+  const { reply } = await handleIntent(session, speech);
+  // Keep session around for next turn
+  callSessions.set(callSid, session);
 
-  // Merge into session (don’t overwrite existing non-null with null)
-  if (nlp.intent && nlp.intent !== "unknown") session.intent = nlp.intent;
-  session.customer_name = session.customer_name ?? nlp.customer_name ?? null;
-  session.phone_number  = session.phone_number  ?? normalizePhone(nlp.phone_number) ?? null;
-  session.appointment_time = session.appointment_time ?? nlp.appointment_time ?? null;
-  session.barber = session.barber ?? nlp.barber ?? null;
-
-  sessions.set(callSid, session);
-
-  // Branch by intent
-  switch (session.intent) {
-    case "greet":
-      return res.type("text/xml").send(
-        twimlSayGather("Hi! I can book, reschedule, cancel, or tell you our hours. What would you like to do?")
-      );
-
-    case "hours":
-      return res.type("text/xml").send(
-        twimlSay("We’re open Monday through Saturday, 9 am to 6 pm. Thanks for calling!")
-      );
-
-    case "agent":
-      return res.type("text/xml").send(
-        twimlSay("Okay, I’ll get a person. Please hold while I connect you.")
-      );
-
-    case "cancel":
-      // Need phone + possibly time to identify
-      if (!session.phone_number) {
-        return res.type("text/xml").send(
-          twimlSayGather("What phone number is the appointment under? You can say it like 8 1 3, 6 0 7, 4 9 8 9.")
-        );
-      }
-      // Delete by phone + (optional) time match
-      const toDelete = db.prepare(`
-        SELECT id FROM appointments
-        WHERE phone_number = ?
-        ORDER BY id DESC LIMIT 1
-      `).get(session.phone_number);
-
-      if (!toDelete) {
-        return res.type("text/xml").send(
-          twimlSay("I couldn't find an appointment under that number. If you want to try again, please call back. Goodbye!")
-        );
-      }
-      db.prepare(`DELETE FROM appointments WHERE id = ?`).run(toDelete.id);
-      return res.type("text/xml").send(
-        twimlSay("All set — your appointment has been cancelled. Thanks for calling!")
-      );
-
-    case "reschedule":
-      // Need phone + new time
-      if (!session.phone_number) {
-        return res.type("text/xml").send(
-          twimlSayGather("What phone number is the appointment under?")
-        );
-      }
-      if (!session.appointment_time) {
-        return res.type("text/xml").send(
-          twimlSayGather("Sure — what time would you like instead?")
-        );
-      }
-      // Update the latest appt by phone
-      const latest = db.prepare(`
-        SELECT id FROM appointments
-        WHERE phone_number = ?
-        ORDER BY id DESC LIMIT 1
-      `).get(session.phone_number);
-
-      if (!latest) {
-        return res.type("text/xml").send(
-          twimlSay("I couldn't find an appointment under that number. If you want to book a new one, just say 'book'. Goodbye!")
-        );
-      }
-      db.prepare(`UPDATE appointments SET appointment_time = ? WHERE id = ?`)
-        .run(session.appointment_time, latest.id);
-
-      return res.type("text/xml").send(
-        twimlSay("Great — you’re rescheduled. You’ll get a confirmation text if enabled. Thanks and have a great day!")
-      );
-
-    case "book":
-      // Need name, phone, time (barber optional)
-      if (!session.customer_name) {
-        return res.type("text/xml").send(
-          twimlSayGather("What name should I put the appointment under?")
-        );
-      }
-      if (!session.phone_number) {
-        return res.type("text/xml").send(
-          twimlSayGather("What phone number should I use for the booking?")
-        );
-      }
-      if (!session.appointment_time) {
-        return res.type("text/xml").send(
-          twimlSayGather("What time would you like?")
-        );
-      }
-      // Save it
-      db.prepare(`
-        INSERT INTO appointments (customer_name, phone_number, appointment_time)
-        VALUES (?, ?, ?)
-      `).run(session.customer_name, session.phone_number, session.appointment_time);
-
-      return res.type("text/xml").send(
-        twimlSay(`You're all set, ${session.customer_name}. See you then!`)
-      );
-
-    default:
-      // Unknown — ask them again
-      return res.type("text/xml").send(
-        twimlSayGather("I can book, reschedule, cancel, or tell you our hours. What would you like to do?")
-      );
-  }
+  res.type("text/xml").send(sayAndListen({ text: reply }));
 });
-
-// ------------- your existing REST endpoints (kept) -------------
-
-// Quick test of DB health
-app.get("/test-db", (req, res) => {
-  try {
-    const rowCount = db.prepare("SELECT COUNT(*) as count FROM appointments").get();
-    res.send(`Database is working ✅. Appointments stored: ${rowCount.count}`);
-  } catch (err) {
-    res.status(500).send("Database error ✗ " + err.message);
-  }
-});
-
-// REST: make appointment (from earlier)
-app.post("/make-appointment", (req, res) => {
-  const { customer_name, phone_number, appointment_time } = req.body || {};
-  if (!customer_name || !phone_number || !appointment_time) {
-    return res.json({ success: false, error: "Missing fields. Required: customer_name, phone_number, appointment_time" });
-  }
-  db.prepare(`INSERT INTO appointments (customer_name, phone_number, appointment_time) VALUES (?, ?, ?)`)
-    .run(customer_name, phone_number, appointment_time);
-  res.json({ success: true, message: "Appointment booked!" });
-});
-
-// REST: list, get, update, delete
-app.get("/appointments", (req, res) => {
-  const phone = req.query.phone ? req.query.phone.replace(/\D/g, "") : null;
-  const q = phone
-    ? db.prepare("SELECT * FROM appointments WHERE phone_number = ? ORDER BY id DESC").all(phone)
-    : db.prepare("SELECT * FROM appointments ORDER BY id DESC").all();
-  res.json(q);
-});
-
-app.get("/appointments/:id", (req, res) => {
-  const row = db.prepare("SELECT * FROM appointments WHERE id = ?").get(req.params.id);
-  if (!row) return res.json({ success: false, error: "Appointment not found" });
-  res.json(row);
-});
-
-app.put("/appointments/:id", (req, res) => {
-  const { appointment_time } = req.body || {};
-  if (!appointment_time) return res.json({ success: false, error: "Missing appointment_time" });
-  const info = db.prepare("UPDATE appointments SET appointment_time = ? WHERE id = ?").run(appointment_time, req.params.id);
-  if (!info.changes) return res.json({ success: false, error: "Appointment not found" });
-  res.json({ success: true, message: "Appointment updated" });
-});
-
-app.delete("/appointments/:id", (req, res) => {
-  const info = db.prepare("DELETE FROM appointments WHERE id = ?").run(req.params.id);
-  if (!info.changes) return res.json({ success: false, error: "Appointment not found" });
-  res.json({ success: true, message: "Appointment deleted" });
-});
-
-// ------------- start (Render will set PORT) -------------
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log("Server running on port", PORT));
