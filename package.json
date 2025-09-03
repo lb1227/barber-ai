@@ -1,16 +1,13 @@
 {
   "name": "barber-ai",
   "version": "1.0.0",
-  "description": "",
-  "main": "index.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {},
   "dependencies": {
-    "dotenv": "^17.2.1",
-    "express": "^5.1.0"
+    "dotenv": "^16.4.5",
+    "express": "^5.1.0",
+    "twilio": "^4.22.0",
+    "better-sqlite3": "^9.6.0"
   }
 }
