@@ -14,19 +14,18 @@ app.use(express.json());
 const BUSINESS_NAME = 'XYZ barbershop';
 const HOURS_TEXT = 'We are open Tuesday to Saturday, 8 AM to 8 PM.';
 const TZ = process.env.TZ || 'America/New_York';
-const REALTIME_MODEL =
-  process.env.OPENAI_REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-12-17';
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-if (!OPENAI_API_KEY) {
+const REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-12-17';
+
+if (!process.env.OPENAI_API_KEY) {
   console.error('❌ Missing OPENAI_API_KEY');
   process.exit(1);
 }
-const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-/* --------- DB: add google_event_id if missing --------- */
+/* ---------- DB migration (safe) ---------- */
 try { db.prepare('ALTER TABLE appointments ADD COLUMN google_event_id TEXT').run(); } catch {}
 
-/* --------- Google Calendar helpers --------- */
+/* ---------- Google Calendar ---------- */
 function makeGAuth() {
   const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN } = process.env;
   if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) return null;
@@ -74,11 +73,11 @@ async function gcalDeleteEvent(eventId) {
     const calendar = makeGAuth();
     if (!calendar || !eventId) return { ok: false };
     await calendar.events.delete({ calendarId: CALENDAR_ID, eventId });
-    return { ok: true };
-  } catch (e) { console.error('GCAL delete error:', e.message); return { ok: false }; }
+  } catch (e) { console.error('GCAL delete error:', e.message); }
+  return { ok: true };
 }
 
-/* --------- Realtime tools (FLAT schema!) --------- */
+/* ---------- Realtime tools (flat schema) ---------- */
 const realtimeTools = [
   {
     type: 'function',
@@ -156,7 +155,7 @@ async function execTool(name, args) {
   }
 }
 
-/* --------- WS bridge (Twilio <-> OpenAI) --------- */
+/* ---------- WS bridge (Twilio <-> OpenAI) ---------- */
 let wss;
 function ensureWSS(server) {
   if (wss) return wss;
@@ -172,37 +171,39 @@ function ensureWSS(server) {
 
     const rt = new WebSocket(
       `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(REALTIME_MODEL)}`,
-      { headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'OpenAI-Beta': 'realtime=v1' } }
+      { headers: { Authorization: `Bearer ${process.env.OPENAI_API_KEY}`, 'OpenAI-Beta': 'realtime=v1' } }
     );
 
     let sessionReady = false;
     let greeted = false;
+    let audioChunks = 0;
 
     rt.on('message', (buf) => {
       try {
         const msg = JSON.parse(buf.toString());
-        // Log light heartbeat of event types to help debug
         if (msg.type && !['response.audio.delta'].includes(msg.type)) {
           console.log('Realtime event:', msg.type);
         }
 
         if (msg.type === 'session.updated') {
           sessionReady = true;
-          // Send greeting *after* session formats are active (μ-law!)
+
+          // Greet *after* session formats are applied
           if (!greeted) {
             greeted = true;
             rt.send(JSON.stringify({
               type: 'response.create',
               response: {
                 modalities: ['audio', 'text'],
-                instructions: `Hello, thank you for calling ${BUSINESS_NAME}, how can I help you today?`
+                instructions: `Hello, thank you for calling ${BUSINESS_NAME}, how can I help you today?`,
+                audio: { voice: 'verse', format: 'g711_ulaw' }
               }
             }));
           }
         }
 
         if (msg.type === 'response.audio.delta' && msg.audio) {
-          // μ-law base64 frames back to Twilio
+          audioChunks++;
           twilioWS.send(JSON.stringify({ event: 'media', media: { payload: msg.audio } }));
         }
 
@@ -212,12 +213,29 @@ function ensureWSS(server) {
           const args = msg.arguments ? JSON.parse(msg.arguments) : {};
           (async () => {
             const out = await execTool(fnName, args);
+            // Return tool output
             rt.send(JSON.stringify({
               type: 'response.function_call_output',
               call_id: callId,
               output: JSON.stringify(out)
             }));
+            // Also ensure audio is spoken
+            if (out?.speak) {
+              rt.send(JSON.stringify({
+                type: 'response.create',
+                response: {
+                  modalities: ['audio', 'text'],
+                  instructions: out.speak,
+                  audio: { voice: 'verse', format: 'g711_ulaw' }
+                }
+              }));
+            }
           })().catch(() => {});
+        }
+
+        if (msg.type === 'response.done') {
+          if (audioChunks) console.log(`Audio chunks sent: ${audioChunks}`);
+          audioChunks = 0;
         }
 
         if (msg.type === 'error') {
@@ -228,8 +246,7 @@ function ensureWSS(server) {
 
     rt.on('open', () => {
       console.log('Realtime WS open');
-
-      // Configure the session first; we will wait for session.updated to greet
+      // Configure audio formats & tools
       rt.send(JSON.stringify({
         type: 'session.update',
         session: {
@@ -262,14 +279,12 @@ Timezone: ${TZ}.
           case 'media':
             if (sessionReady && evt.media?.payload) {
               rt.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: evt.media.payload }));
-              // VAD will commit automatically; no manual commit needed on each chunk
             }
             break;
           case 'stop':
             console.log('Twilio stop'); try { rt.close(); } catch {}
             break;
-          default:
-            break;
+          default: break;
         }
       } catch {}
     });
@@ -281,7 +296,7 @@ Timezone: ${TZ}.
   return wss;
 }
 
-/* --------- Twilio webhooks & sanity --------- */
+/* ---------- Twilio webhooks & quick sanity ---------- */
 app.post('/voice', (req, res) => {
   const streamUrl = `wss://${req.headers.host}/twilio`;
   console.log('POST /voice -> will stream to', streamUrl);
@@ -296,7 +311,6 @@ app.post('/voice', (req, res) => {
   res.type('text/xml').send(twiml);
 });
 
-// quick check Twilio can speak from this service
 app.get('/voice-say', (_req, res) => {
   const twiml = `
 <Response>
@@ -307,7 +321,7 @@ app.get('/voice-say', (_req, res) => {
 
 app.get('/health', (_req, res) => res.send('ok'));
 
-/* --------- Minimal REST (unchanged) --------- */
+/* ---------- Minimal REST (unchanged) ---------- */
 app.post('/make-appointment', (req, res) => {
   const { customer_name, phone_number, appointment_time } = req.body || {};
   if (!customer_name || !phone_number || !appointment_time) {
@@ -346,7 +360,7 @@ app.delete('/appointments/:id', (req, res) => {
   res.json({ success: true, message: 'Appointment deleted' });
 });
 
-/* --------- Boot --------- */
+/* ---------- Boot ---------- */
 const PORT = process.env.PORT || 3000;
 const server = app.listen(PORT, () => console.log('Server listening on', PORT));
 ensureWSS(server);
