@@ -1,7 +1,6 @@
 // server.js — Twilio <-> OpenAI Realtime (g711_ulaw) + Google Calendar + SQLite
 import 'dotenv/config';
 import express from 'express';
-import crypto from 'crypto';
 import { WebSocketServer } from 'ws';
 import WebSocket from 'ws';
 import OpenAI from 'openai';
@@ -53,7 +52,8 @@ function makeGAuth() {
   oauth2.setCredentials({ refresh_token: GOOGLE_REFRESH_TOKEN });
   return google.calendar({ version: 'v3', auth: oauth2 });
 }
-const CALENDAR_ID = process.env.CALENDAR_ID || process.env.GOOGLE_CALENDAR_ID || 'primary';
+const CALENDAR_ID =
+  process.env.CALENDAR_ID || process.env.GOOGLE_CALENDAR_ID || 'primary';
 
 function toEventTimes(isoOrPhrase) {
   if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(isoOrPhrase)) {
@@ -85,7 +85,13 @@ async function gcalCreateEvent({ summary, description, startISO, endISO }) {
     return { id: null, ok: false, error: e.message };
   }
 }
-async function gcalUpdateEvent({ eventId, summary, description, startISO, endISO }) {
+async function gcalUpdateEvent({
+  eventId,
+  summary,
+  description,
+  startISO,
+  endISO
+}) {
   try {
     const calendar = makeGAuth();
     if (!calendar || !eventId) return { ok: false };
@@ -118,70 +124,65 @@ async function gcalDeleteEvent(eventId) {
 }
 
 /* =========================
-   Realtime tools (model calls these)
+   Realtime tools (FLAT schema for Realtime API)
    ========================= */
-const tools = [
+const realtimeTools = [
   {
     type: 'function',
-    function: {
-      name: 'book_appointment',
-      description: 'Create a new appointment',
-      parameters: {
-        type: 'object',
-        properties: {
-          name: { type: 'string', description: 'First and last name' },
-          phone: { type: 'string', description: 'Digits only' },
-          datetime: { type: 'string', description: 'ISO-like e.g. 2025-09-06T15:00' }
-        },
-        required: ['name', 'phone', 'datetime']
-      }
+    name: 'book_appointment',
+    description: 'Create a new appointment',
+    parameters: {
+      type: 'object',
+      properties: {
+        name: { type: 'string', description: 'First and last name' },
+        phone: { type: 'string', description: 'Digits only' },
+        datetime: {
+          type: 'string',
+          description: 'ISO-like e.g. 2025-09-06T15:00'
+        }
+      },
+      required: ['name', 'phone', 'datetime']
     }
   },
   {
     type: 'function',
-    function: {
-      name: 'reschedule_latest_by_phone',
-      description: 'Reschedule the caller’s most recent appointment by phone',
-      parameters: {
-        type: 'object',
-        properties: {
-          phone: { type: 'string' },
-          new_datetime: { type: 'string' }
-        },
-        required: ['phone', 'new_datetime']
-      }
+    name: 'reschedule_latest_by_phone',
+    description: 'Reschedule the caller’s most recent appointment by phone',
+    parameters: {
+      type: 'object',
+      properties: {
+        phone: { type: 'string' },
+        new_datetime: { type: 'string' }
+      },
+      required: ['phone', 'new_datetime']
     }
   },
   {
     type: 'function',
-    function: {
-      name: 'cancel_latest_by_phone',
-      description: 'Cancel the caller’s most recent appointment by phone',
-      parameters: {
-        type: 'object',
-        properties: { phone: { type: 'string' } },
-        required: ['phone']
-      }
+    name: 'cancel_latest_by_phone',
+    description: 'Cancel the caller’s most recent appointment by phone',
+    parameters: {
+      type: 'object',
+      properties: {
+        phone: { type: 'string' }
+      },
+      required: ['phone']
     }
   },
   {
     type: 'function',
-    function: {
-      name: 'get_hours',
-      description: 'Say business hours',
-      parameters: { type: 'object', properties: {} }
-    }
+    name: 'get_hours',
+    description: 'Say business hours',
+    parameters: { type: 'object', properties: {} }
   },
   {
     type: 'function',
-    function: {
-      name: 'ask_followup',
-      description: 'Ask a short follow-up question',
-      parameters: {
-        type: 'object',
-        properties: { question: { type: 'string' } },
-        required: ['question']
-      }
+    name: 'ask_followup',
+    description: 'Ask a short follow-up question',
+    parameters: {
+      type: 'object',
+      properties: { question: { type: 'string' } },
+      required: ['question']
     }
   }
 ];
@@ -194,7 +195,8 @@ async function execTool(name, args) {
       const g = await gcalCreateEvent({
         summary: `Haircut — ${name}`,
         description: `Booked by phone ${phone}`,
-        startISO, endISO
+        startISO,
+        endISO
       });
       db.prepare(
         'INSERT INTO appointments (customer_name, phone_number, appointment_time, google_event_id) VALUES (?, ?, ?, ?)'
@@ -203,26 +205,38 @@ async function execTool(name, args) {
     }
     case 'reschedule_latest_by_phone': {
       const { phone, new_datetime } = args;
-      const row = db.prepare(
-        'SELECT id, google_event_id FROM appointments WHERE phone_number = ? ORDER BY id DESC LIMIT 1'
-      ).get(phone);
-      if (!row) return { speak: 'I could not find an appointment on that number. Want me to book one instead?' };
+      const row = db
+        .prepare(
+          'SELECT id, google_event_id FROM appointments WHERE phone_number = ? ORDER BY id DESC LIMIT 1'
+        )
+        .get(phone);
+      if (!row)
+        return {
+          speak:
+            'I could not find an appointment on that number. Want me to book one instead?'
+        };
       const { startISO, endISO } = toEventTimes(new_datetime);
       if (row.google_event_id) {
         await gcalUpdateEvent({
           eventId: row.google_event_id,
-          summary: undefined, description: undefined,
-          startISO, endISO
+          summary: undefined,
+          description: undefined,
+          startISO,
+          endISO
         });
       }
-      db.prepare('UPDATE appointments SET appointment_time = ? WHERE id = ?').run(new_datetime, row.id);
+      db.prepare(
+        'UPDATE appointments SET appointment_time = ? WHERE id = ?'
+      ).run(new_datetime, row.id);
       return { speak: `All set. I moved it to ${new_datetime}.` };
     }
     case 'cancel_latest_by_phone': {
       const { phone } = args;
-      const row = db.prepare(
-        'SELECT id, google_event_id FROM appointments WHERE phone_number = ? ORDER BY id DESC LIMIT 1'
-      ).get(phone);
+      const row = db
+        .prepare(
+          'SELECT id, google_event_id FROM appointments WHERE phone_number = ? ORDER BY id DESC LIMIT 1'
+        )
+        .get(phone);
       if (!row) return { speak: 'I couldn’t find an appointment on that number.' };
       if (row.google_event_id) await gcalDeleteEvent(row.google_event_id);
       db.prepare('DELETE FROM appointments WHERE id = ?').run(row.id);
@@ -248,21 +262,18 @@ function ensureWSS(server) {
 
   server.on('upgrade', (req, socket, head) => {
     if (!req.url.startsWith('/twilio')) return socket.destroy();
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
+    wss.handleUpgrade(req, socket, head, (ws) =>
+      wss.emit('connection', ws, req)
+    );
   });
 
   wss.on('connection', async (twilioWS, req) => {
-    const callerFromParam = (() => {
-      try {
-        const u = new URL(`https://x${req.url}`);
-        return (u.searchParams.get('from') || '').replace(/\D/g, '');
-      } catch { return ''; }
-    })();
-
     console.log('Twilio WS connected');
 
     const rt = new WebSocket(
-      `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(REALTIME_MODEL)}`,
+      `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
+        REALTIME_MODEL
+      )}`,
       {
         headers: {
           Authorization: `Bearer ${OPENAI_API_KEY}`,
@@ -277,10 +288,14 @@ function ensureWSS(server) {
     rt.on('message', (buf) => {
       try {
         const msg = JSON.parse(buf.toString());
+
         if (msg.type === 'response.audio.delta' && msg.audio) {
           // msg.audio is base64 g711_ulaw because we set output_audio_format
-          twilioWS.send(JSON.stringify({ event: 'media', media: { payload: msg.audio } }));
+          twilioWS.send(
+            JSON.stringify({ event: 'media', media: { payload: msg.audio } })
+          );
         }
+
         // Tool calls
         if (msg.type === 'response.function_call') {
           (async () => {
@@ -289,66 +304,72 @@ function ensureWSS(server) {
             const args = msg.arguments ? JSON.parse(msg.arguments) : {};
             if (fnName && callId) {
               const out = await execTool(fnName, args);
-              rt.send(JSON.stringify({
-                type: 'response.function_call_output',
-                call_id: callId,
-                output: JSON.stringify(out)
-              }));
+              rt.send(
+                JSON.stringify({
+                  type: 'response.function_call_output',
+                  call_id: callId,
+                  output: JSON.stringify(out)
+                })
+              );
             }
           })().catch(() => {});
         }
+
         if (msg.type === 'error') {
           console.error('Realtime ERROR payload:', JSON.stringify(msg, null, 2));
         }
-      } catch (e) {
-        // ignore
-      }
+      } catch (_) {}
     });
 
     rt.on('open', () => {
       console.log('Realtime WS open');
 
       // Configure the session once
-      rt.send(JSON.stringify({
-        type: 'session.update',
-        session: {
-          // Twilio sends μ-law (8k), we want the Realtime API to expect/emit the same:
-          input_audio_format: 'g711_ulaw',
-          output_audio_format: 'g711_ulaw',
-          turn_detection: { type: 'server_vad' },
-          // Voice for TTS
-          voice: 'verse',
-          // Tools live on the session
-          tools,
-          instructions: `
+      rt.send(
+        JSON.stringify({
+          type: 'session.update',
+          session: {
+            input_audio_format: 'g711_ulaw',
+            output_audio_format: 'g711_ulaw',
+            turn_detection: { type: 'server_vad' },
+            voice: 'verse',
+            tools: realtimeTools, // <<<<< FLAT TOOLS HERE
+            instructions: `
 You are a warm, efficient phone receptionist for ${BUSINESS_NAME}.
 Talk naturally and concisely. Use the tools to book/reschedule/cancel,
 or to state hours. For bookings: ask day/time first, then full name, then confirm phone if missing.
 For rescheduling: ask for new time then move the latest appointment for the caller phone.
-Timezone: ${TZ}. Start with: "Hello, thank you for calling ${BUSINESS_NAME}, how can I help you today?"
-          `.trim()
-        }
-      }));
+Timezone: ${TZ}.
+            `.trim()
+          }
+        })
+      );
 
       // Kick a greeting response (audio+text)
-      rt.send(JSON.stringify({
-        type: 'response.create',
-        response: {
-          modalities: ['audio', 'text'],
-          instructions: `Hello, thank you for calling ${BUSINESS_NAME}, how can I help you today?`
-        }
-      }));
+      rt.send(
+        JSON.stringify({
+          type: 'response.create',
+          response: {
+            modalities: ['audio', 'text'],
+            instructions: `Hello, thank you for calling ${BUSINESS_NAME}, how can I help you today?`
+          }
+        })
+      );
 
       sessionReady = true;
     });
 
     rt.on('close', () => {
       console.log('Realtime closed');
-      try { twilioWS.close(); } catch {}
+      try {
+        twilioWS.close();
+      } catch {}
     });
     rt.on('error', (e) => {
       console.error('Realtime socket error:', e.message);
-      try { twilioWS.close(); } catch {}
+      try {
+        twilioWS.close();
+      } catch {}
     });
 
     // Twilio media in -> OpenAI Realtime
@@ -357,34 +378,45 @@ Timezone: ${TZ}. Start with: "Hello, thank you for calling ${BUSINESS_NAME}, how
         const evt = JSON.parse(raw.toString());
         switch (evt.event) {
           case 'start':
-            console.log('Twilio start, from:', evt?.start?.customParameters?.from || callerFromParam);
+            console.log(
+              'Twilio start, from:',
+              evt?.start?.customParameters?.from || ''
+            );
             break;
           case 'media':
             if (sessionReady && evt.media && evt.media.payload) {
               // Append μ-law audio to the model input buffer
-              rt.send(JSON.stringify({
-                type: 'input_audio_buffer.append',
-                audio: evt.media.payload // base64 g711_ulaw
-              }));
-              // With server_vad, no need to commit each chunk; VAD will handle turns
+              rt.send(
+                JSON.stringify({
+                  type: 'input_audio_buffer.append',
+                  audio: evt.media.payload // base64 g711_ulaw
+                })
+              );
+              // With server_vad, VAD decides when to end the turn.
             }
             break;
           case 'stop':
             console.log('Twilio stop');
-            try { rt.close(); } catch {}
+            try {
+              rt.close();
+            } catch {}
             break;
           default:
             break;
         }
-      } catch { /* ignore */ }
+      } catch (_) {}
     });
 
     twilioWS.on('close', () => {
       console.log('Twilio WS closed');
-      try { rt.close(); } catch {}
+      try {
+        rt.close();
+      } catch {}
     });
     twilioWS.on('error', () => {
-      try { rt.close(); } catch {}
+      try {
+        rt.close();
+      } catch {}
     });
   });
 
@@ -395,16 +427,14 @@ Timezone: ${TZ}. Start with: "Hello, thank you for calling ${BUSINESS_NAME}, how
    Twilio webhooks & sanity routes
    ========================= */
 app.post('/voice', (req, res) => {
-  // IMPORTANT: Twilio hits us over HTTPS; pass “from” as a custom param for logs
   const streamUrl = `wss://${req.headers.host}/twilio`;
-  const from = (req.body?.From || '').replace(/"/g, '');
   console.log('POST /voice -> will stream to', streamUrl);
 
   const twiml = `
 <Response>
   <Connect>
     <Stream url="${streamUrl}">
-      <Parameter name="from" value="${from}"/>
+      <Parameter name="from" value="${(req.body?.From || '').replace(/"/g, '')}"/>
     </Stream>
   </Connect>
 </Response>
@@ -413,7 +443,6 @@ app.post('/voice', (req, res) => {
   res.type('text/xml').send(twiml);
 });
 
-// Simple Polly sanity check route used earlier
 app.get('/voice-say', (_req, res) => {
   const twiml = `
 <Response>
@@ -433,7 +462,8 @@ app.post('/make-appointment', (req, res) => {
   if (!customer_name || !phone_number || !appointment_time) {
     return res.json({
       success: false,
-      error: 'Missing fields. Required: customer_name, phone_number, appointment_time'
+      error:
+        'Missing fields. Required: customer_name, phone_number, appointment_time'
     });
   }
   db.prepare(
@@ -445,28 +475,41 @@ app.post('/make-appointment', (req, res) => {
 app.get('/appointments', (req, res) => {
   const { phone } = req.query;
   const rows = phone
-    ? db.prepare('SELECT * FROM appointments WHERE phone_number = ? ORDER BY id DESC').all(String(phone))
+    ? db
+        .prepare(
+          'SELECT * FROM appointments WHERE phone_number = ? ORDER BY id DESC'
+        )
+        .all(String(phone))
     : db.prepare('SELECT * FROM appointments ORDER BY id DESC').all();
   res.json(rows);
 });
 
 app.get('/appointments/:id', (req, res) => {
-  const row = db.prepare('SELECT * FROM appointments WHERE id = ?').get(req.params.id);
+  const row = db
+    .prepare('SELECT * FROM appointments WHERE id = ?')
+    .get(req.params.id);
   if (!row) return res.json({ success: false, error: 'Appointment not found' });
   res.json(row);
 });
 
 app.put('/appointments/:id', (req, res) => {
   const { appointment_time } = req.body || {};
-  if (!appointment_time) return res.json({ success: false, error: 'appointment_time required' });
-  const info = db.prepare('UPDATE appointments SET appointment_time = ? WHERE id = ?').run(appointment_time, req.params.id);
-  if (!info.changes) return res.json({ success: false, error: 'Appointment not found' });
+  if (!appointment_time)
+    return res.json({ success: false, error: 'appointment_time required' });
+  const info = db
+    .prepare('UPDATE appointments SET appointment_time = ? WHERE id = ?')
+    .run(appointment_time, req.params.id);
+  if (!info.changes)
+    return res.json({ success: false, error: 'Appointment not found' });
   res.json({ success: true, message: 'Appointment updated' });
 });
 
 app.delete('/appointments/:id', (req, res) => {
-  const info = db.prepare('DELETE FROM appointments WHERE id = ?').run(req.params.id);
-  if (!info.changes) return res.json({ success: false, error: 'Appointment not found' });
+  const info = db
+    .prepare('DELETE FROM appointments WHERE id = ?')
+    .run(req.params.id);
+  if (!info.changes)
+    return res.json({ success: false, error: 'Appointment not found' });
   res.json({ success: true, message: 'Appointment deleted' });
 });
 
