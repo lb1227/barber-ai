@@ -1,382 +1,212 @@
-// server.js — Realtime voice + Google Calendar sync + SQLite (Twilio fix: include streamSid when sending audio)
+// server.js — Twilio <-> OpenAI Realtime bridge (g711 μ-law) + simple Twilio test route
 import 'dotenv/config';
 import express from 'express';
-import crypto from 'crypto';
 import { WebSocketServer } from 'ws';
-import OpenAI from 'openai';
-import { google } from 'googleapis';
-import db from './database.js';
+import bodyParser from 'body-parser';
 
 const app = express();
-app.use(express.urlencoded({ extended: true }));
-app.use(express.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.json());
 
-/* ─────────── config ─────────── */
-const BUSINESS_NAME = 'XYZ barbershop';
-const HOURS_TEXT = 'We are open Tuesday to Saturday, 8 AM to 8 PM.';
-const TZ = process.env.TZ || 'America/New_York';
-const POLLY_VOICE = process.env.POLLY_VOICE || 'Matthew';
-const REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-12-17';
+const PORT = process.env.PORT || 10000;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 
-if (!process.env.OPENAI_API_KEY) {
-  console.error('❌ Missing OPENAI_API_KEY');
-  process.exit(1);
-}
+// ───────────────────────────────────────────────────────────────────────────────
+//  HEALTH + simple Twilio “say” route (good sanity checks)
+// ───────────────────────────────────────────────────────────────────────────────
+app.get('/health', (_req, res) => res.send('ok'));
 
-const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+app.post('/voice-say', (req, res) => {
+  // A pure-Twilio Say to confirm your number is pointed at this app correctly.
+  const twiml = `
+    <Response>
+      <Say voice="Polly.Matthew-Neural">This is the test route speaking. Your Twilio webhooks are correct.</Say>
+      <Pause length="1"/>
+      <Say voice="Polly.Matthew-Neural">Now hanging up.</Say>
+      <Hangup/>
+    </Response>
+  `.trim();
+  res.type('text/xml').send(twiml);
+});
 
-/* ─────────── DB migration ─────────── */
-try { db.prepare('ALTER TABLE appointments ADD COLUMN google_event_id TEXT').run(); } catch {}
-
-/* ─────────── Google Calendar helpers ─────────── */
-function makeGAuth() {
-  const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN } = process.env;
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REFRESH_TOKEN) return null;
-  const oauth2Client = new google.auth.OAuth2(GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET);
-  oauth2Client.setCredentials({ refresh_token: GOOGLE_REFRESH_TOKEN });
-  return google.calendar({ version: 'v3', auth: oauth2Client });
-}
-async function gcalCreateEvent({ summary, description, startISO, endISO }) {
-  const calendar = makeGAuth();
-  if (!calendar) return { id: null, ok: false, error: 'gcal not configured' };
-  const calendarId = process.env.CALENDAR_ID || process.env.GOOGLE_CALENDAR_ID || 'primary';
-  const res = await calendar.events.insert({
-    calendarId,
-    requestBody: { summary, description, start: { dateTime: startISO, timeZone: TZ }, end: { dateTime: endISO, timeZone: TZ } }
-  });
-  return { id: res.data.id || null, ok: true };
-}
-async function gcalUpdateEvent({ eventId, summary, description, startISO, endISO }) {
-  const calendar = makeGAuth();
-  if (!calendar || !eventId) return { ok: false };
-  const calendarId = process.env.CALENDAR_ID || process.env.GOOGLE_CALENDAR_ID || 'primary';
-  await calendar.events.patch({
-    calendarId, eventId,
-    requestBody: { summary, description, start: { dateTime: startISO, timeZone: TZ }, end: { dateTime: endISO, timeZone: TZ } }
-  });
-  return { ok: true };
-}
-async function gcalDeleteEvent(eventId) {
-  const calendar = makeGAuth();
-  if (!calendar || !eventId) return { ok: false };
-  const calendarId = process.env.CALENDAR_ID || process.env.GOOGLE_CALENDAR_ID || 'primary';
-  await calendar.events.delete({ calendarId, eventId });
-  return { ok: true };
-}
-function toEventTimes(isoOrPhrase) {
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(isoOrPhrase)) {
-    const start = new Date(isoOrPhrase);
-    const end = new Date(start.getTime() + 60 * 60 * 1000);
-    return { startISO: start.toISOString(), endISO: end.toISOString() };
-  }
-  const start = new Date(Date.now() + 60 * 60 * 1000);
-  const end = new Date(start.getTime() + 60 * 60 * 1000);
-  return { startISO: start.toISOString(), endISO: end.toISOString() };
-}
-
-/* ─────────── Tools the model can call ─────────── */
-const tools = [
-  {
-    type: 'function',
-    function: {
-      name: 'book_appointment',
-      description: 'Create a new appointment',
-      parameters: {
-        type: 'object',
-        properties: {
-          name: { type: 'string' },
-          phone: { type: 'string' },
-          datetime: { type: 'string', description: 'ISO-like e.g. 2025-09-06T15:00' }
-        },
-        required: ['name', 'phone', 'datetime']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'reschedule_latest_by_phone',
-      description: 'Reschedule the caller’s most recent appointment by phone',
-      parameters: {
-        type: 'object',
-        properties: { phone: { type: 'string' }, new_datetime: { type: 'string' } },
-        required: ['phone', 'new_datetime']
-      }
-    }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'cancel_latest_by_phone',
-      description: 'Cancel the caller’s most recent appointment by phone',
-      parameters: { type: 'object', properties: { phone: { type: 'string' } }, required: ['phone'] }
-    }
-  },
-  {
-    type: 'function',
-    function: { name: 'get_hours', description: 'Say business hours', parameters: { type: 'object', properties: {} } }
-  },
-  {
-    type: 'function',
-    function: {
-      name: 'ask_followup',
-      description: 'Ask a short follow-up question',
-      parameters: { type: 'object', properties: { question: { type: 'string' } }, required: ['question'] }
-    }
-  }
-];
-
-async function execTool(name, args) {
-  switch (name) {
-    case 'book_appointment': {
-      const { name, phone, datetime } = args;
-      const { startISO, endISO } = toEventTimes(datetime);
-      const g = await gcalCreateEvent({
-        summary: `Haircut — ${name}`, description: `Booked by phone ${phone}`, startISO, endISO
-      });
-      db.prepare('INSERT INTO appointments (customer_name, phone_number, appointment_time, google_event_id) VALUES (?, ?, ?, ?)')
-        .run(name, phone, datetime, g.id || null);
-      return { speak: `Booked ${name} for ${datetime}.` };
-    }
-    case 'reschedule_latest_by_phone': {
-      const { phone, new_datetime } = args;
-      const row = db.prepare('SELECT id, google_event_id FROM appointments WHERE phone_number = ? ORDER BY id DESC LIMIT 1').get(phone);
-      if (!row) return { speak: 'I could not find an appointment for that number. Want me to book one instead?' };
-      const { startISO, endISO } = toEventTimes(new_datetime);
-      if (row.google_event_id) await gcalUpdateEvent({ eventId: row.google_event_id, startISO, endISO });
-      db.prepare('UPDATE appointments SET appointment_time = ? WHERE id = ?').run(new_datetime, row.id);
-      return { speak: `All set. I moved it to ${new_datetime}.` };
-    }
-    case 'cancel_latest_by_phone': {
-      const { phone } = args;
-      const row = db.prepare('SELECT id, google_event_id FROM appointments WHERE phone_number = ? ORDER BY id DESC LIMIT 1').get(phone);
-      if (!row) return { speak: 'I couldn’t find an appointment on that number.' };
-      if (row.google_event_id) await gcalDeleteEvent(row.google_event_id);
-      db.prepare('DELETE FROM appointments WHERE id = ?').run(row.id);
-      return { speak: 'Your appointment has been cancelled.' };
-    }
-    case 'get_hours': return { speak: HOURS_TEXT };
-    case 'ask_followup': return { speak: String(args.question || 'Could you clarify?') };
-    default: return { speak: 'Sorry, I didn’t get that.' };
-  }
-}
-
-/* ─────────── WebSocket bridge (Twilio <-> OpenAI Realtime) ─────────── */
-let wss;
-function ensureWSS(server) {
-  if (wss) return wss;
-  wss = new WebSocketServer({ noServer: true });
-
-  server.on('upgrade', (req, socket, head) => {
-    if (!req.url.startsWith('/twilio')) return socket.destroy();
-    wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
-  });
-
-  wss.on('connection', async (twilioWS) => {
-    const rtURL = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(REALTIME_MODEL)}`;
-    const { WebSocket } = await import('ws');
-    const rt = new WebSocket(rtURL, {
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        'OpenAI-Beta': 'realtime=v1',
-      }
-    });
-
-    let streamSid = null;
-    let callerPhone = '';
-
-    rt.on('open', () => {
-      // Tell the model how audio will arrive from Twilio and that we want text+audio back
-      rt.send(JSON.stringify({
-        type: 'session.update',
-        session: {
-          // Twilio sends base64 μ-law 8k frames
-          input_audio_format: { type: 'input_audio', audio_format: 'g711_ulaw', sample_rate_hz: 8000 },
-          response: { modalities: ['audio', 'text'], audio_format: 'g711_ulaw', instructions: '' },
-          instructions: `
-You are a warm, efficient phone receptionist for ${BUSINESS_NAME}.
-Use the tools to book/reschedule/cancel, or to state hours.
-Ask for missing info briefly. Assume timezone ${TZ}.
-Speak naturally and concisely.
-          `,
-          tools
-        }
-      }));
-
-      // Initial spoken greeting
-      rt.send(JSON.stringify({
-        type: 'response.create',
-        response: {
-          modalities: ['audio', 'text'],
-          instructions: 'Hello, thank you for calling XYZ barbershop, how can I help you today?',
-        }
-      }));
-      console.log('Realtime event: session.created');
-    });
-
-    rt.on('message', async (raw) => {
-      let data;
-      try { data = JSON.parse(raw.toString()); } catch { return; }
-
-      // Audio chunks to play to the caller
-      if (data.type === 'response.output_audio.delta' && data.delta && streamSid) {
-        // IMPORTANT: include streamSid so Twilio will play it
-        twilioWS.send(JSON.stringify({
-          event: 'media',
-          streamSid,
-          media: { payload: data.delta }   // base64 μ-law 8k
-        }));
-      }
-
-      // Function/tool calls
-      if (data.type === 'response.function_call') {
-        try {
-          const { name, arguments: argStr, call_id } = data;
-          const args = argStr ? JSON.parse(argStr) : {};
-          if (name && call_id) {
-            const result = await execTool(name, args);
-            rt.send(JSON.stringify({
-              type: 'response.function_call_output',
-              call_id,
-              output: JSON.stringify(result)
-            }));
-          }
-        } catch (e) {
-          console.error('Tool error', e);
-        }
-      }
-
-      if (data.type === 'error') {
-        console.error('Realtime ERROR payload:', JSON.stringify(data, null, 2));
-      }
-    });
-
-    const closeBoth = () => { try { rt.close(); } catch {} try { twilioWS.close(); } catch {} };
-
-    rt.on('close', () => { console.log('Realtime closed'); closeBoth(); });
-    rt.on('error', (e) => { console.error('Realtime error:', e?.message || e); closeBoth(); });
-
-    // Incoming events from Twilio
-    twilioWS.on('message', (raw) => {
-      let evt;
-      try { evt = JSON.parse(raw.toString()); } catch { return; }
-
-      // Twilio lifecycle events
-      if (evt.event === 'start') {
-        streamSid = evt?.start?.streamSid || null;               // <-- we keep streamSid here
-        callerPhone = (evt?.start?.customParameters?.from || '').replace(/\D/g, '');
-        console.log('Twilio start, streamSid:', streamSid, 'from:', callerPhone);
-        return;
-      }
-      if (evt.event === 'stop') {
-        console.log('Twilio stop');
-        return closeBoth();
-      }
-
-      // Caller audio -> OpenAI
-      if (evt.event === 'media' && evt.media?.payload) {
-        // Append and commit small buffers frequently
-        rt.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: evt.media.payload }));
-        rt.send(JSON.stringify({ type: 'input_audio_buffer.commit' }));
-        // Ask model to produce next turn (audio+text)
-        rt.send(JSON.stringify({ type: 'response.create', response: { modalities: ['audio', 'text'] } }));
-      }
-    });
-
-    twilioWS.on('close', () => closeBoth());
-    twilioWS.on('error', () => closeBoth());
-  });
-
-  return wss;
-}
-
-/* ─────────── Twilio HTTP entry ─────────── */
+// ───────────────────────────────────────────────────────────────────────────────
+//  Production voice: Twilio Media Streams -> OpenAI Realtime (g711 μ-law)
+// ───────────────────────────────────────────────────────────────────────────────
 app.post('/voice', (req, res) => {
-  const streamUrl = `wss://${req.headers.host}/twilio`;
-  const from = (req.body?.From || '').replace(/"/g, '');
+  // Twilio Connect Stream to our WS endpoint
+  const url = `wss://${req.headers.host}/twilio`;
   const twiml = `
     <Response>
       <Connect>
-        <Stream url="${streamUrl}">
-          <Parameter name="from" value="${from}"/>
+        <Stream url="${url}">
+          <Parameter name="from" value="${(req.body?.From || '').replace(/"/g, '')}"/>
         </Stream>
       </Connect>
     </Response>
-  `;
-  res.type('text/xml').send(twiml.trim());
+  `.trim();
+  res.type('text/xml').send(twiml);
 });
 
-/* ─────────── Simple test route that speaks without Realtime ─────────── */
-app.get('/voice-say', (_req, res) => {
-  const twiml = `
-    <Response>
-      <Say voice="${POLLY_VOICE}">This is a test of outbound audio. If you hear this, Twilio playback works.</Say>
-    </Response>
-  `;
-  res.type('text/xml').send(twiml.trim());
+// WS server for Twilio Stream
+const wss = new WebSocketServer({ noServer: true });
+
+// HTTP -> WS upgrade
+const server = app.listen(PORT, () => {
+  console.log(`Server listening on ${PORT}`);
 });
 
-/* ─────────── Fallback (non-streaming) ─────────── */
-app.post('/voice-fallback', (_req, res) => {
-  const twiml = `
-    <Response>
-      <Gather input="speech" action="/voice-fallback-handle" method="POST" speechTimeout="auto">
-        <Say voice="${POLLY_VOICE}">Hello, thank you for calling ${BUSINESS_NAME}, how can I help you today?</Say>
-      </Gather>
-      <Say voice="${POLLY_VOICE}">Sorry, I didn’t catch that.</Say>
-      <Hangup/>
-    </Response>
-  `;
-  res.type('text/xml').send(twiml.trim());
-});
-app.post('/voice-fallback-handle', (_req, res) => {
-  const twiml = `
-    <Response>
-      <Say voice="${POLLY_VOICE}">Thanks! The realtime assistant is temporarily unavailable. Please try again later.</Say>
-      <Hangup/>
-    </Response>
-  `;
-  res.type('text/xml').send(twiml.trim());
+server.on('upgrade', (req, socket, head) => {
+  if (!req.url?.startsWith('/twilio')) return socket.destroy();
+  wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
 });
 
-/* ─────────── REST API for appointments (unchanged) ─────────── */
-app.post('/make-appointment', (req, res) => {
-  const { customer_name, phone_number, appointment_time } = req.body || {};
-  if (!customer_name || !phone_number || !appointment_time) {
-    return res.json({ success: false, error: 'Missing fields. Required: customer_name, phone_number, appointment_time' });
-  }
-  db.prepare('INSERT INTO appointments (customer_name, phone_number, appointment_time, google_event_id) VALUES (?, ?, ?, ?)')
-    .run(customer_name, phone_number, appointment_time, null);
-  res.json({ success: true, message: 'Appointment booked!' });
-});
-app.get('/appointments', (req, res) => {
-  const { phone } = req.query;
-  const rows = phone
-    ? db.prepare('SELECT * FROM appointments WHERE phone_number = ? ORDER BY id DESC').all(String(phone))
-    : db.prepare('SELECT * FROM appointments ORDER BY id DESC').all();
-  res.json(rows);
-});
-app.get('/appointments/:id', (req, res) => {
-  const row = db.prepare('SELECT * FROM appointments WHERE id = ?').get(req.params.id);
-  if (!row) return res.json({ success: false, error: 'Appointment not found' });
-  res.json(row);
-});
-app.put('/appointments/:id', (req, res) => {
-  const { appointment_time } = req.body || {};
-  if (!appointment_time) return res.json({ success: false, error: 'appointment_time required' });
-  const info = db.prepare('UPDATE appointments SET appointment_time = ? WHERE id = ?').run(appointment_time, req.params.id);
-  if (!info.changes) return res.json({ success: false, error: 'Appointment not found' });
-  res.json({ success: true, message: 'Appointment updated' });
-});
-app.delete('/appointments/:id', (req, res) => {
-  const info = db.prepare('DELETE FROM appointments WHERE id = ?').run(req.params.id);
-  if (!info.changes) return res.json({ success: false, error: 'Appointment not found' });
-  res.json({ success: true, message: 'Appointment deleted' });
+// Utility: queue sends until ws is actually open
+function makeQueuedSender(ws) {
+  let open = false;
+  const queue = [];
+  ws.on('open', () => {
+    open = true;
+    while (queue.length) ws.send(queue.shift());
+  });
+  return (payload) => {
+    const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
+    if (open) ws.send(data);
+    else queue.push(data);
+  };
+}
+
+wss.on('connection', async (twilioWS, req) => {
+  // OpenAI Realtime WS
+  const rt = new (await import('ws')).WebSocket(
+    'wss://api.openai.com/v1/realtime?model=' +
+      encodeURIComponent(process.env.OPENAI_REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-12-17'),
+    {
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        'OpenAI-Beta': 'realtime=v1',
+      },
+    }
+  );
+
+  const sendRT = makeQueuedSender(rt);
+
+  // When RT opens, configure session and greet
+  rt.on('open', () => {
+    console.log('Realtime WS open');
+
+    // (1) Tell OpenAI the incoming audio is μ-law and request μ-law out.
+    sendRT({
+      type: 'session.update',
+      session: {
+        // MUST be a string (earlier error was sending an object)
+        input_audio_format: 'g711_ulaw',
+        // Ask the model to produce μ-law back
+        output_audio_format: 'g711_ulaw',
+        // A short instruction is optional, but helpful
+        instructions:
+          'You are a friendly barber shop phone agent. Be concise and natural. Listen and reply in speech.',
+      },
+    });
+
+    // (2) Proactively greet the caller. Note: modalities must be ['audio','text']
+    sendRT({
+      type: 'response.create',
+      response: {
+        modalities: ['audio', 'text'],
+        instructions: 'Hello, thank you for calling XYZ barbershop. How can I help you today?',
+        audio: {
+          // voice name is ignored for μ-law, but must be present
+          voice: 'alloy',
+          format: 'g711_ulaw',
+        },
+      },
+    });
+  });
+
+  rt.on('error', (e) => console.error('Realtime WS error:', e.message || e));
+  rt.on('close', () => {
+    console.log('Realtime closed');
+    try { twilioWS.close(); } catch {}
+  });
+
+  // Twilio -> OpenAI (caller audio)
+  twilioWS.on('message', (msg) => {
+    try {
+      const event = JSON.parse(msg.toString());
+      switch (event.event) {
+        case 'start':
+          console.log('Twilio start, from:', event?.start?.customParameters?.from);
+          break;
+
+        case 'media': {
+          // Twilio sends base64 μ-law frames
+          const ulaw = event.media?.payload;
+          if (ulaw) {
+            sendRT({
+              type: 'input_audio_buffer.append',
+              audio: ulaw, // base64 μ-law
+            });
+          }
+          break;
+        }
+
+        case 'mark':
+          // ignore
+          break;
+
+        case 'stop':
+          console.log('Twilio stop');
+          // finalize any buffered audio on the OpenAI side
+          sendRT({ type: 'input_audio_buffer.commit' });
+          try { rt.close(); } catch {}
+          try { twilioWS.close(); } catch {}
+          break;
+      }
+    } catch (e) {
+      console.error('Twilio message parse error:', e);
+    }
+  });
+
+  twilioWS.on('close', () => {
+    console.log('Twilio WS closed');
+    try { rt.close(); } catch {}
+  });
+
+  twilioWS.on('error', (e) => {
+    console.error('Twilio WS error:', e.message || e);
+    try { rt.close(); } catch {}
+  });
+
+  // OpenAI -> Twilio (assistant audio)
+  rt.on('message', (data) => {
+    try {
+      const msg = JSON.parse(data.toString());
+
+      // Most useful to log high-level events while debugging:
+      if (msg.type?.startsWith('response.') || msg.type?.startsWith('input_audio_buffer.')) {
+        console.log('Realtime event:', msg.type);
+      }
+
+      // The audio deltas come as base64 payload (μ-law) in response.audio.delta
+      if (msg.type === 'response.audio.delta' && msg.audio) {
+        twilioWS.send(
+          JSON.stringify({
+            event: 'media',
+            media: { payload: msg.audio }, // Twilio expects base64 μ-law
+          })
+        );
+      }
+
+      // Once a response is done, you can create another response if you want the
+      // assistant to take the next turn automatically. For now we let the user speak.
+      // if (msg.type === 'response.done') { ... }
+
+    } catch (e) {
+      console.error('Realtime message parse error:', e);
+    }
+  });
 });
 
-app.get('/health', (_req, res) => res.send('ok'));
-
-/* ─────────── start server & WS ─────────── */
-const PORT = process.env.PORT || 3000;
-const server = app.listen(PORT, () => console.log('Server listening on', PORT));
-ensureWSS(server);
+// ───────────────────────────────────────────────────────────────────────────────
+// Done
+// ───────────────────────────────────────────────────────────────────────────────
