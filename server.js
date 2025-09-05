@@ -1,4 +1,4 @@
-// server.js — Twilio <-> OpenAI Realtime (μ-law), server VAD, no per-frame commit
+// server.js — Twilio <-> OpenAI Realtime (μ-law), server VAD, correct field types
 
 import 'dotenv/config';
 import express from 'express';
@@ -17,10 +17,10 @@ if (!OPENAI_KEY) {
 const REALTIME_MODEL =
   process.env.OPENAI_REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-12-17';
 
-// Simple health check
+// Healthcheck
 app.get('/health', (_req, res) => res.send('ok'));
 
-// Twilio entry: stream media to our WS
+// Twilio entrypoint: connect caller media to our WS
 app.post('/voice', (req, res) => {
   const streamUrl = `wss://${req.headers.host}/twilio`;
   const twiml = `
@@ -50,7 +50,6 @@ function ensureWSS(server) {
     const url = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
       REALTIME_MODEL
     )}`;
-
     const rt = new (await import('ws')).WebSocket(url, {
       headers: {
         Authorization: `Bearer ${OPENAI_KEY}`,
@@ -60,41 +59,28 @@ function ensureWSS(server) {
 
     let sessionReady = false;
 
-    // Realtime -> Twilio: play audio deltas back to the caller
+    // Realtime -> Twilio: forward audio deltas
     rt.on('message', (buf) => {
       let msg;
-      try {
-        msg = JSON.parse(buf.toString());
-      } catch {
-        return;
-      }
+      try { msg = JSON.parse(buf.toString()); } catch { return; }
 
       if (msg.type === 'error' || msg.error) {
         console.error('Realtime ERROR payload:', JSON.stringify(msg, null, 2));
         return;
       }
 
-      // Helpful logging of event types
-      if (msg?.type) {
-        console.log('Realtime event:', msg.type);
-      }
+      // Helpful log
+      if (msg?.type) console.log('Realtime event:', msg.type);
 
-      // Current and legacy audio delta event names
       const isAudioDelta =
         msg?.type === 'response.output_audio.delta' ||
         msg?.type === 'response.audio.delta' ||
         msg?.type === 'response.speech.delta';
 
       if (isAudioDelta) {
-        // Different previews used different fields for the base64 μ-law chunk
-        const payload = msg.delta || msg.audio || msg.chunk;
+        const payload = msg.delta || msg.audio || msg.chunk; // base64 μ-law chunk
         if (payload) {
-          twilioWS.send(
-            JSON.stringify({
-              event: 'media',
-              media: { payload },
-            })
-          );
+          twilioWS.send(JSON.stringify({ event: 'media', media: { payload } }));
         }
       }
     });
@@ -102,34 +88,27 @@ function ensureWSS(server) {
     rt.on('open', () => {
       console.log('Realtime WS open');
 
-      // Configure session for μ-law in/out + server VAD
+      // IMPORTANT: these must be STRING values (not objects)
       rt.send(
         JSON.stringify({
           type: 'session.update',
           session: {
-            input_audio_format: { type: 'g711_ulaw' },   // Twilio μ-law input
-            output_audio_format: { type: 'g711_ulaw' },  // μ-law back to Twilio
+            input_audio_format: 'g711_ulaw',   // Twilio sends μ-law
+            output_audio_format: 'g711_ulaw',  // play μ-law back to Twilio
             voice: 'verse',
-            // Let the server detect end-of-speech; we will NOT send commit each frame
-            turn_detection: {
-              type: 'server_vad',
-              // optional tunables:
-              // threshold: 0.5,
-              // prefix_padding_ms: 300,
-              // silence_duration_ms: 300
-            },
+            turn_detection: { type: 'server_vad' }, // no per-frame commit
             instructions:
               'You are a friendly, concise phone receptionist for XYZ barbershop. Speak naturally.',
           },
         })
       );
 
-      // Immediate spoken greeting
+      // Greeting — modalities must be ['audio','text'] for this preview
       rt.send(
         JSON.stringify({
           type: 'response.create',
           response: {
-            modalities: ['audio'],
+            modalities: ['audio', 'text'],
             instructions:
               'Hello, thank you for calling XYZ barbershop, how can I help you today?',
           },
@@ -149,31 +128,22 @@ function ensureWSS(server) {
       try { twilioWS.close(); } catch {}
     });
 
-    // Twilio -> Realtime: only append audio; DO NOT commit when using server VAD
+    // Twilio -> Realtime: append audio ONLY (server VAD handles turn-taking)
     twilioWS.on('message', (raw) => {
       let evt;
-      try {
-        evt = JSON.parse(raw.toString());
-      } catch {
-        return;
-      }
+      try { evt = JSON.parse(raw.toString()); } catch { return; }
 
-      if (evt.event === 'start') {
-        console.log('Twilio start');
-        return;
-      }
+      if (evt.event === 'start') { console.log('Twilio start'); return; }
 
       if (evt.event === 'media') {
         if (!sessionReady) return;
-        // Append caller audio chunk (base64 μ-law)
         rt.send(
           JSON.stringify({
             type: 'input_audio_buffer.append',
-            audio: evt.media.payload,
+            audio: evt.media.payload, // base64 μ-law
           })
         );
-        // ❌ Do NOT send input_audio_buffer.commit here when using server_vad
-        return;
+        return; // DO NOT commit here when using server_vad
       }
 
       if (evt.event === 'stop') {
