@@ -1,4 +1,4 @@
-// server.js — Twilio <-> OpenAI Realtime (g711_ulaw) + Google Calendar + SQLite
+// server.js — Twilio <-> OpenAI Realtime (μ-law) + Google Calendar + SQLite
 import 'dotenv/config';
 import express from 'express';
 import { WebSocketServer } from 'ws';
@@ -187,16 +187,14 @@ function ensureWSS(server) {
 
         if (msg.type === 'session.updated') {
           sessionReady = true;
-
-          // Greet *after* session formats are applied
+          // Greet after session formats are set
           if (!greeted) {
             greeted = true;
             rt.send(JSON.stringify({
               type: 'response.create',
               response: {
-                modalities: ['audio', 'text'],
-                instructions: `Hello, thank you for calling ${BUSINESS_NAME}, how can I help you today?`,
-                audio: { voice: 'verse', format: 'g711_ulaw' }
+                modalities: ['audio','text'],
+                instructions: `Hello, thank you for calling ${BUSINESS_NAME}, how can I help you today?`
               }
             }));
           }
@@ -213,20 +211,19 @@ function ensureWSS(server) {
           const args = msg.arguments ? JSON.parse(msg.arguments) : {};
           (async () => {
             const out = await execTool(fnName, args);
-            // Return tool output
+            // return tool output
             rt.send(JSON.stringify({
               type: 'response.function_call_output',
               call_id: callId,
               output: JSON.stringify(out)
             }));
-            // Also ensure audio is spoken
+            // speak the tool result
             if (out?.speak) {
               rt.send(JSON.stringify({
                 type: 'response.create',
                 response: {
-                  modalities: ['audio', 'text'],
-                  instructions: out.speak,
-                  audio: { voice: 'verse', format: 'g711_ulaw' }
+                  modalities: ['audio','text'],
+                  instructions: out.speak
                 }
               }));
             }
@@ -246,7 +243,6 @@ function ensureWSS(server) {
 
     rt.on('open', () => {
       console.log('Realtime WS open');
-      // Configure audio formats & tools
       rt.send(JSON.stringify({
         type: 'session.update',
         session: {
@@ -296,7 +292,7 @@ Timezone: ${TZ}.
   return wss;
 }
 
-/* ---------- Twilio webhooks & quick sanity ---------- */
+/* ---------- Twilio webhooks & sanity ---------- */
 app.post('/voice', (req, res) => {
   const streamUrl = `wss://${req.headers.host}/twilio`;
   console.log('POST /voice -> will stream to', streamUrl);
@@ -321,7 +317,7 @@ app.get('/voice-say', (_req, res) => {
 
 app.get('/health', (_req, res) => res.send('ok'));
 
-/* ---------- Minimal REST (unchanged) ---------- */
+/* ---------- Minimal REST ---------- */
 app.post('/make-appointment', (req, res) => {
   const { customer_name, phone_number, appointment_time } = req.body || {};
   if (!customer_name || !phone_number || !appointment_time) {
