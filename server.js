@@ -1,8 +1,8 @@
-// server.js — Twilio <-> OpenAI Realtime bridge (g711 μ-law) + simple Twilio test route
+// server.js — Twilio <-> OpenAI Realtime (μ-law, full-duplex) + /voice-say test
 import 'dotenv/config';
 import express from 'express';
-import { WebSocketServer } from 'ws';
 import bodyParser from 'body-parser';
+import { WebSocketServer } from 'ws';
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
@@ -10,19 +10,20 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 10000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const REALTIME_MODEL =
+  process.env.OPENAI_REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-12-17';
 
 // ───────────────────────────────────────────────────────────────────────────────
-//  HEALTH + simple Twilio “say” route (good sanity checks)
+// Health + simple Say route to test Twilio pointing
 // ───────────────────────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => res.send('ok'));
 
 app.post('/voice-say', (req, res) => {
-  // A pure-Twilio Say to confirm your number is pointed at this app correctly.
   const twiml = `
     <Response>
-      <Say voice="Polly.Matthew-Neural">This is the test route speaking. Your Twilio webhooks are correct.</Say>
-      <Pause length="1"/>
-      <Say voice="Polly.Matthew-Neural">Now hanging up.</Say>
+      <Say voice="Polly.Matthew-Neural">
+        This is the simple test route. Your Twilio webhook is working.
+      </Say>
       <Hangup/>
     </Response>
   `.trim();
@@ -30,16 +31,16 @@ app.post('/voice-say', (req, res) => {
 });
 
 // ───────────────────────────────────────────────────────────────────────────────
-//  Production voice: Twilio Media Streams -> OpenAI Realtime (g711 μ-law)
+// Voice entry: Twilio -> connect stream to our WS endpoint
 // ───────────────────────────────────────────────────────────────────────────────
 app.post('/voice', (req, res) => {
-  // Twilio Connect Stream to our WS endpoint
   const url = `wss://${req.headers.host}/twilio`;
+  const from = (req.body?.From || '').replace(/"/g, '');
   const twiml = `
     <Response>
       <Connect>
         <Stream url="${url}">
-          <Parameter name="from" value="${(req.body?.From || '').replace(/"/g, '')}"/>
+          <Parameter name="from" value="${from}"/>
         </Stream>
       </Connect>
     </Response>
@@ -47,10 +48,7 @@ app.post('/voice', (req, res) => {
   res.type('text/xml').send(twiml);
 });
 
-// WS server for Twilio Stream
 const wss = new WebSocketServer({ noServer: true });
-
-// HTTP -> WS upgrade
 const server = app.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
 });
@@ -60,26 +58,25 @@ server.on('upgrade', (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
 });
 
-// Utility: queue sends until ws is actually open
+// Queue helper — don’t send to OpenAI until the WS is open
 function makeQueuedSender(ws) {
   let open = false;
-  const queue = [];
+  const q = [];
   ws.on('open', () => {
     open = true;
-    while (queue.length) ws.send(queue.shift());
+    while (q.length) ws.send(q.shift());
   });
   return (payload) => {
     const data = typeof payload === 'string' ? payload : JSON.stringify(payload);
     if (open) ws.send(data);
-    else queue.push(data);
+    else q.push(data);
   };
 }
 
 wss.on('connection', async (twilioWS, req) => {
-  // OpenAI Realtime WS
+  // Connect to OpenAI Realtime
   const rt = new (await import('ws')).WebSocket(
-    'wss://api.openai.com/v1/realtime?model=' +
-      encodeURIComponent(process.env.OPENAI_REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-12-17'),
+    `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(REALTIME_MODEL)}`,
     {
       headers: {
         Authorization: `Bearer ${OPENAI_API_KEY}`,
@@ -90,73 +87,63 @@ wss.on('connection', async (twilioWS, req) => {
 
   const sendRT = makeQueuedSender(rt);
 
-  // When RT opens, configure session and greet
+  // ── OpenAI WS opened ────────────────────────────────────────────────────────
   rt.on('open', () => {
     console.log('Realtime WS open');
 
-    // (1) Tell OpenAI the incoming audio is μ-law and request μ-law out.
+    // 1) Configure the session: μ-law in/out, voice at the session level
     sendRT({
       type: 'session.update',
       session: {
-        // MUST be a string (earlier error was sending an object)
+        // Twilio sends μ-law 8kHz
         input_audio_format: 'g711_ulaw',
-        // Ask the model to produce μ-law back
+        // Ask for μ-law out so we can pipe right back to Twilio
         output_audio_format: 'g711_ulaw',
-        // A short instruction is optional, but helpful
+        voice: 'alloy',
         instructions:
-          'You are a friendly barber shop phone agent. Be concise and natural. Listen and reply in speech.',
+          'You are a friendly barber shop phone agent. Be concise and natural and reply in speech.',
       },
     });
 
-    // (2) Proactively greet the caller. Note: modalities must be ['audio','text']
+    // 2) Proactive greeting (modalities must include BOTH audio and text)
     sendRT({
       type: 'response.create',
       response: {
         modalities: ['audio', 'text'],
-        instructions: 'Hello, thank you for calling XYZ barbershop. How can I help you today?',
-        audio: {
-          // voice name is ignored for μ-law, but must be present
-          voice: 'alloy',
-          format: 'g711_ulaw',
-        },
+        instructions:
+          'Hello, thank you for calling XYZ barbershop. How can I help you today?',
       },
     });
   });
 
-  rt.on('error', (e) => console.error('Realtime WS error:', e.message || e));
+  rt.on('error', (e) => console.error('Realtime WS error:', e?.message || e));
   rt.on('close', () => {
     console.log('Realtime closed');
     try { twilioWS.close(); } catch {}
   });
 
-  // Twilio -> OpenAI (caller audio)
-  twilioWS.on('message', (msg) => {
+  // ── Twilio -> OpenAI (caller audio) ─────────────────────────────────────────
+  twilioWS.on('message', (buf) => {
     try {
-      const event = JSON.parse(msg.toString());
+      const event = JSON.parse(buf.toString());
       switch (event.event) {
         case 'start':
           console.log('Twilio start, from:', event?.start?.customParameters?.from);
           break;
 
         case 'media': {
-          // Twilio sends base64 μ-law frames
-          const ulaw = event.media?.payload;
+          const ulaw = event.media?.payload; // base64 μ-law 8kHz
           if (ulaw) {
             sendRT({
               type: 'input_audio_buffer.append',
-              audio: ulaw, // base64 μ-law
+              audio: ulaw,
             });
           }
           break;
         }
 
-        case 'mark':
-          // ignore
-          break;
-
         case 'stop':
           console.log('Twilio stop');
-          // finalize any buffered audio on the OpenAI side
           sendRT({ type: 'input_audio_buffer.commit' });
           try { rt.close(); } catch {}
           try { twilioWS.close(); } catch {}
@@ -173,40 +160,50 @@ wss.on('connection', async (twilioWS, req) => {
   });
 
   twilioWS.on('error', (e) => {
-    console.error('Twilio WS error:', e.message || e);
+    console.error('Twilio WS error:', e?.message || e);
     try { rt.close(); } catch {}
   });
 
-  // OpenAI -> Twilio (assistant audio)
+  // ── OpenAI -> Twilio (assistant audio) ──────────────────────────────────────
   rt.on('message', (data) => {
     try {
       const msg = JSON.parse(data.toString());
 
-      // Most useful to log high-level events while debugging:
-      if (msg.type?.startsWith('response.') || msg.type?.startsWith('input_audio_buffer.')) {
+      // (A) Log key events while debugging
+      if (
+        msg.type?.startsWith('response.') ||
+        msg.type?.startsWith('input_audio_buffer.')
+      ) {
         console.log('Realtime event:', msg.type);
       }
 
-      // The audio deltas come as base64 payload (μ-law) in response.audio.delta
-      if (msg.type === 'response.audio.delta' && msg.audio) {
+      // (B) When OpenAI detects the end of your speech, explicitly ask it to reply
+      if (msg.type === 'input_audio_buffer.speech_stopped') {
+        sendRT({
+          type: 'response.create',
+          response: {
+            modalities: ['audio', 'text'],
+            // no instructions needed; it will continue the conversation
+          },
+        });
+      }
+
+      // (C) Pipe audio deltas back to Twilio. Some builds use response.output_audio.delta.
+      if (
+        (msg.type === 'response.audio.delta' && msg.audio) ||
+        (msg.type === 'response.output_audio.delta' && msg.audio)
+      ) {
         twilioWS.send(
           JSON.stringify({
             event: 'media',
-            media: { payload: msg.audio }, // Twilio expects base64 μ-law
+            media: { payload: msg.audio }, // base64 μ-law chunk
           })
         );
       }
-
-      // Once a response is done, you can create another response if you want the
-      // assistant to take the next turn automatically. For now we let the user speak.
-      // if (msg.type === 'response.done') { ... }
-
     } catch (e) {
       console.error('Realtime message parse error:', e);
     }
   });
 });
 
-// ───────────────────────────────────────────────────────────────────────────────
-// Done
 // ───────────────────────────────────────────────────────────────────────────────
