@@ -1,5 +1,6 @@
-// server.js — Twilio <-> OpenAI Realtime
-// Adds: robust logging, Realtime retry, don't drop Twilio immediately, μ-law 8kHz both ways, server VAD, guaranteed audio responses
+// server.js — Twilio <-> OpenAI Realtime (μ-law 8kHz, server VAD)
+// Fix: input_audio_format/output_audio_format must be STRINGS (not objects).
+// Adds: log ALL incoming Realtime messages; keep Twilio up briefly on failure.
 
 import 'dotenv/config';
 import express from 'express';
@@ -14,19 +15,17 @@ const PORT = process.env.PORT || 10000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-12-17';
 
-// ---- small helpers ----
-const ULawSilenceByte = 0xFF;            // μ-law silence
-const SILENCE_FRAME_MS = 20;             // Twilio media frame is 20 ms
-const SAMPLE_RATE = 8000;                // μ-law sample rate
-const BYTES_PER_MS = SAMPLE_RATE / 1000; // 8 bytes/ms in μ-law (1 byte/sample @ 8 kHz)
+// ---- helpers ----
+const ULawSilenceByte = 0xFF;
+const SILENCE_FRAME_MS = 20;
+const SAMPLE_RATE = 8000; // μ-law 8kHz
+const BYTES_PER_MS = SAMPLE_RATE / 1000;
+
 function base64Silence(ms = SILENCE_FRAME_MS) {
   const bytes = Buffer.alloc(ms * BYTES_PER_MS, ULawSilenceByte);
   return bytes.toString('base64');
 }
-
-function now() {
-  return new Date().toISOString();
-}
+const now = () => new Date().toISOString();
 
 function makeQueuedSender(ws) {
   let open = false;
@@ -42,13 +41,13 @@ function makeQueuedSender(ws) {
   };
 }
 
-// ---------- HTTP routes ----------
+// ---- routes ----
 app.get('/health', (_req, res) => res.send('ok'));
 
 app.post('/voice-say', (_req, res) => {
   const twiml = `
     <Response>
-      <Say voice="Polly.Matthew-Neural">This is the test route. Your webhook is working.</Say>
+      <Say voice="Polly.Matthew-Neural">Webhook test speaking. This confirms your TwiML URL is working.</Say>
       <Hangup/>
     </Response>
   `.trim();
@@ -70,10 +69,9 @@ app.post('/voice', (req, res) => {
   res.type('text/xml').send(twiml);
 });
 
-// ---------- WS bridge ----------
+// ---- WS bridge ----
 const wss = new WebSocketServer({ noServer: true });
 const server = app.listen(PORT, () => console.log(`[${now()}] Server listening on ${PORT}`));
-
 server.on('upgrade', (req, socket, head) => {
   if (!req.url?.startsWith('/twilio')) return socket.destroy();
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
@@ -88,12 +86,12 @@ wss.on('connection', async (twilioWS) => {
 
   console.log(`[${now()}] Twilio WS open`);
 
-  // optional: send a couple of silence frames while we spin up Realtime to prevent Twilio from dropping
-  for (let i = 0; i < 3; i++) {
-    try {
+  // keep Twilio alive while we spin up Realtime
+  try {
+    for (let i = 0; i < 3; i++) {
       twilioWS.send(JSON.stringify({ event: 'media', media: { payload: base64Silence() } }));
-    } catch {}
-  }
+    }
+  } catch {}
 
   async function connectRealtime() {
     return new Promise(async (resolve) => {
@@ -106,17 +104,16 @@ wss.on('connection', async (twilioWS) => {
           },
         }
       );
-
       sendRT = makeQueuedSender(rt);
 
       rt.on('open', () => {
         console.log(`[${now()}] Realtime WS open`);
-        // Force μ-law in/out 8kHz, server VAD, and set instructions.
+        // IMPORTANT: formats must be strings
         sendRT({
           type: 'session.update',
           session: {
-            input_audio_format: { type: 'g711_ulaw', sample_rate_hz: 8000 },
-            output_audio_format: { type: 'g711_ulaw', sample_rate_hz: 8000 },
+            input_audio_format: 'g711_ulaw',
+            output_audio_format: 'g711_ulaw',
             turn_detection: { type: 'server_vad', threshold: 0.5, silence_ms: 700 },
             voice: 'verse',
             instructions:
@@ -124,7 +121,7 @@ wss.on('connection', async (twilioWS) => {
           },
         });
 
-        // Proactive greeting, requesting audio explicitly
+        // initial greeting — request audio explicitly
         sendRT({
           type: 'response.create',
           response: {
@@ -137,21 +134,12 @@ wss.on('connection', async (twilioWS) => {
         resolve(true);
       });
 
+      // LOG EVERYTHING so we can see errors
       rt.on('message', (raw) => {
         try {
           const msg = JSON.parse(raw.toString());
+          console.log(`[${now()}] Realtime msg:`, msg.type || msg);
 
-          // useful trace
-          if (
-            msg.type?.startsWith('response.') ||
-            msg.type?.startsWith('input_audio_buffer.') ||
-            msg.type === 'session.created' ||
-            msg.type === 'session.updated'
-          ) {
-            console.log(`[${now()}] Realtime event: ${msg.type}`);
-          }
-
-          // when the user stops talking, commit and request a response
           if (msg.type === 'input_audio_buffer.speech_stopped') {
             sendRT({ type: 'input_audio_buffer.commit' });
             sendRT({
@@ -163,7 +151,6 @@ wss.on('connection', async (twilioWS) => {
             });
           }
 
-          // stream audio back to Twilio — cover both event names
           if (
             (msg.type === 'response.audio.delta' && msg.audio) ||
             (msg.type === 'response.output_audio.delta' && msg.audio)
@@ -172,17 +159,12 @@ wss.on('connection', async (twilioWS) => {
             twilioWS.send(JSON.stringify({ event: 'media', media: { payload: msg.audio } }));
           }
 
-          // log text deltas (debug)
-          if (msg.type === 'response.delta' && msg.delta) {
-            console.log(`[${now()}] Text delta: ${JSON.stringify(msg.delta)}`);
-          }
-
           if (msg.type === 'response.created') sawAudioDelta = false;
           if (msg.type === 'response.done' && !sawAudioDelta) {
-            console.log(`[${now()}] response.done but no audio deltas were received for this turn.`);
+            console.log(`[${now()}] response.done but NO audio deltas this turn.`);
           }
         } catch (e) {
-          console.error(`[${now()}] Realtime msg parse error:`, e);
+          console.error(`[${now()}] Realtime parse error:`, e);
         }
       });
 
@@ -194,14 +176,12 @@ wss.on('connection', async (twilioWS) => {
         console.error(
           `[${now()}] Realtime closed. code=${code}, reason=${reason?.toString?.() || ''} retry=${retryCount}`
         );
-
-        // Retry once if it closed very early (e.g. auth / handshake hiccup)
         if (!closed && retryCount < 1) {
           retryCount += 1;
           setTimeout(() => {
             console.log(`[${now()}] Retrying Realtime connection...`);
             connectRealtime().then(() => resolve(true));
-          }, 400);
+          }, 300);
         } else {
           resolve(false);
         }
@@ -210,11 +190,9 @@ wss.on('connection', async (twilioWS) => {
   }
 
   const connected = await connectRealtime();
-
   if (!connected) {
     console.error(`[${now()}] Realtime failed; keeping Twilio alive briefly then ending.`);
     try {
-      // keep 1 second of silence so call doesn't feel abrupt
       for (let i = 0; i < 50; i++) {
         twilioWS.send(JSON.stringify({ event: 'media', media: { payload: base64Silence() } }));
       }
@@ -223,7 +201,7 @@ wss.on('connection', async (twilioWS) => {
     return;
   }
 
-  // ----- Twilio -> Realtime -----
+  // Twilio -> Realtime
   twilioWS.on('message', (buf) => {
     try {
       const evt = JSON.parse(buf.toString());
@@ -231,11 +209,11 @@ wss.on('connection', async (twilioWS) => {
         case 'start':
           console.log(`[${now()}] Twilio start, from:`, evt?.start?.customParameters?.from);
           break;
-        case 'media': {
-          const ulaw = evt.media?.payload;
-          if (ulaw) sendRT({ type: 'input_audio_buffer.append', audio: ulaw });
+        case 'media':
+          if (evt.media?.payload) {
+            sendRT({ type: 'input_audio_buffer.append', audio: evt.media.payload });
+          }
           break;
-        }
         case 'stop':
           console.log(`[${now()}] Twilio stop`);
           sendRT({ type: 'input_audio_buffer.commit' });
@@ -244,7 +222,7 @@ wss.on('connection', async (twilioWS) => {
           break;
       }
     } catch (e) {
-      console.error(`[${now()}] Twilio msg parse error:`, e);
+      console.error(`[${now()}] Twilio parse error:`, e);
     }
   });
 
