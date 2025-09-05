@@ -1,4 +1,4 @@
-// server.js — Twilio <-> OpenAI Realtime (G.711 μ-law) with auto-reply + audio out
+// server.js — Twilio <-> OpenAI Realtime, forced μ-law 8kHz, server VAD, guaranteed audio
 import 'dotenv/config';
 import express from 'express';
 import bodyParser from 'body-parser';
@@ -10,27 +10,20 @@ app.use(bodyParser.json());
 
 const PORT = process.env.PORT || 10000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const REALTIME_MODEL =
-  process.env.OPENAI_REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-12-17';
+const REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || 'gpt-4o-realtime-preview-2024-12-17';
 
-// ───────────────────────────────────────────────────────────────────────────────
-// Health + simple Say test
-// ───────────────────────────────────────────────────────────────────────────────
 app.get('/health', (_req, res) => res.send('ok'));
 
 app.post('/voice-say', (_req, res) => {
   const twiml = `
     <Response>
-      <Say voice="Polly.Matthew-Neural">This is the simple test route. Your Twilio webhook is working.</Say>
+      <Say voice="Polly.Matthew-Neural">This is the test route. Your webhook is working.</Say>
       <Hangup/>
     </Response>
   `.trim();
   res.type('text/xml').send(twiml);
 });
 
-// ───────────────────────────────────────────────────────────────────────────────
-// Voice entry: connect Twilio to our WS bridge
-// ───────────────────────────────────────────────────────────────────────────────
 app.post('/voice', (req, res) => {
   const url = `wss://${req.headers.host}/twilio`;
   const from = (req.body?.From || '').replace(/"/g, '');
@@ -54,7 +47,6 @@ server.on('upgrade', (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
 });
 
-// Queue helper so we don’t send to OpenAI before ws is OPEN
 function makeQueuedSender(ws) {
   let open = false;
   const q = [];
@@ -70,50 +62,45 @@ function makeQueuedSender(ws) {
 }
 
 wss.on('connection', async (twilioWS) => {
-  // Connect to OpenAI Realtime
   const rt = new (await import('ws')).WebSocket(
     `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(REALTIME_MODEL)}`,
     { headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, 'OpenAI-Beta': 'realtime=v1' } }
   );
   const sendRT = makeQueuedSender(rt);
 
-  // Track whether we’ve seen audio deltas for diagnostics
   let sawAudioDelta = false;
 
-  // ── OpenAI socket open: configure session + greet
   rt.on('open', () => {
     console.log('Realtime WS open');
 
-    // Configure μ-law in/out; set a voice; add brief system style
+    // Force μ-law in/out at 8kHz and enable server-side VAD (turn detection)
     sendRT({
       type: 'session.update',
       session: {
-        input_audio_format: 'g711_ulaw',
-        output_audio_format: 'g711_ulaw',
-        voice: 'alloy', // OpenAI voice used for streaming (fallback to a default if unknown)
+        input_audio_format: { type: 'g711_ulaw', sample_rate_hz: 8000 },
+        output_audio_format: { type: 'g711_ulaw', sample_rate_hz: 8000 },
+        voice: 'verse',
+        turn_detection: { type: 'server_vad', threshold: 0.5, silence_ms: 700 },
         instructions:
-          'You are a friendly barber shop phone agent. Be concise and natural and reply in speech.',
+          'You are a friendly barber shop phone agent. Always reply in speech (audio) and keep answers brief.',
       },
     });
 
-    // Proactive greeting — request audio specifically
+    // Proactive greeting (also requests audio explicitly)
     sendRT({
       type: 'response.create',
       response: {
         modalities: ['audio', 'text'],
         instructions: 'Hello, thank you for calling XYZ barbershop. How can I help you today?',
-        audio: { voice: 'alloy', format: 'g711_ulaw' },
+        audio: { voice: 'verse', format: 'g711_ulaw' },
       },
     });
   });
 
   rt.on('error', (e) => console.error('Realtime WS error:', e?.message || e));
-  rt.on('close', () => {
-    console.log('Realtime closed');
-    try { twilioWS.close(); } catch {}
-  });
+  rt.on('close', () => { console.log('Realtime closed'); try { twilioWS.close(); } catch {} });
 
-  // ── Twilio -> OpenAI (caller audio)
+  // Twilio -> OpenAI
   twilioWS.on('message', (buf) => {
     try {
       const evt = JSON.parse(buf.toString());
@@ -123,14 +110,11 @@ wss.on('connection', async (twilioWS) => {
           break;
         case 'media': {
           const ulaw = evt.media?.payload; // base64 μ-law
-          if (ulaw) {
-            sendRT({ type: 'input_audio_buffer.append', audio: ulaw });
-          }
+          if (ulaw) sendRT({ type: 'input_audio_buffer.append', audio: ulaw });
           break;
         }
         case 'stop':
           console.log('Twilio stop');
-          // Finalize anything remaining and close
           sendRT({ type: 'input_audio_buffer.commit' });
           try { rt.close(); } catch {}
           try { twilioWS.close(); } catch {}
@@ -144,29 +128,28 @@ wss.on('connection', async (twilioWS) => {
   twilioWS.on('close', () => { console.log('Twilio WS closed'); try { rt.close(); } catch {} });
   twilioWS.on('error', (e) => { console.error('Twilio WS error:', e?.message || e); try { rt.close(); } catch {} });
 
-  // ── OpenAI -> Twilio (assistant audio + control events)
+  // OpenAI -> Twilio
   rt.on('message', (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
 
-      // Helpful diagnostics
       if (msg.type?.startsWith('response.') || msg.type?.startsWith('input_audio_buffer.')) {
         console.log('Realtime event:', msg.type);
       }
 
-      // When model detects your speech ended, finalize and ask it to respond
+      // If your speech stops, finalize input and request a response with audio
       if (msg.type === 'input_audio_buffer.speech_stopped') {
         sendRT({ type: 'input_audio_buffer.commit' });
         sendRT({
           type: 'response.create',
           response: {
             modalities: ['audio', 'text'],
-            audio: { voice: 'alloy', format: 'g711_ulaw' },
+            audio: { voice: 'verse', format: 'g711_ulaw' },
           },
         });
       }
 
-      // Stream audio back to Twilio — handle either delta name
+      // Stream audio back to Twilio (cover both event names)
       if (
         (msg.type === 'response.audio.delta' && msg.audio) ||
         (msg.type === 'response.output_audio.delta' && msg.audio)
@@ -175,12 +158,14 @@ wss.on('connection', async (twilioWS) => {
         twilioWS.send(JSON.stringify({ event: 'media', media: { payload: msg.audio } }));
       }
 
-      // Optional: after a response finishes, log if we never saw audio deltas (debugging)
+      // Log any text deltas so we can see if model responded only in text
+      if (msg.type === 'response.delta' && msg.delta) {
+        console.log('Text delta:', JSON.stringify(msg.delta));
+      }
+
+      if (msg.type === 'response.created') sawAudioDelta = false;
       if (msg.type === 'response.done' && !sawAudioDelta) {
         console.log('response.done but no audio deltas were received for this turn.');
-      }
-      if (msg.type === 'response.created') {
-        sawAudioDelta = false; // reset per response
       }
     } catch (e) {
       console.error('Realtime msg parse error:', e);
