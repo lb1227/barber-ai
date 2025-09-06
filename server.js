@@ -1,5 +1,4 @@
-// Minimal Twilio -> OpenAI Realtime TALK test (fixed session.type)
-// Goal: prove OpenAI can speak "Hello, you are connected to Barber AI."
+// Minimal Twilio -> OpenAI Realtime TALK test (corrected keys)
 
 const http = require("http");
 const express = require("express");
@@ -39,27 +38,26 @@ wss.on("connection", (twilioWS) => {
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}` }
   });
 
-  // --- OpenAI lifecycle ---
   aiWS.on("open", () => {
     log(`[${tag}] ✅ OpenAI WS open`);
 
-    // FIX: include session.type
+    // Correct session.update structure
     aiWS.send(JSON.stringify({
       type: "session.update",
       session: {
         type: "realtime",
-        modalities: ["audio"],
-        voice: "alloy",                // must be one of alloy, ash, coral, etc
+        modalities: ["audio"],       // ✅ correct location
+        voice: "alloy",              // must be alloy, ash, coral, etc
         output_audio_format: "g711_ulaw"
       }
     }));
 
-    // Create a one-line response
+    // Minimal "hello" test
     aiWS.send(JSON.stringify({
       type: "response.create",
       response: {
-        modalities: ["audio"],
-        instructions: "Hello, you are connected to Barber AI."
+        instructions: "Hello, you are connected to Barber AI.",
+        modalities: ["audio"]        // ✅ correct location
       }
     }));
   });
@@ -67,8 +65,8 @@ wss.on("connection", (twilioWS) => {
   aiWS.on("message", (msg) => {
     const data = JSON.parse(msg.toString());
 
-    // forward audio chunks to Twilio
     if (data.type === "response.audio.delta" && data.delta) {
+      // forward audio chunks to Twilio
       twilioWS.send(JSON.stringify({
         event: "media",
         media: { payload: data.delta }
@@ -76,7 +74,7 @@ wss.on("connection", (twilioWS) => {
     }
 
     if (data.type === "response.completed") {
-      log(`[${tag}] ✅ Response completed, closing soon`);
+      log(`[${tag}] ✅ Response completed`);
       setTimeout(() => {
         try { twilioWS.close(); } catch {}
         try { aiWS.close(); } catch {}
@@ -91,7 +89,6 @@ wss.on("connection", (twilioWS) => {
   aiWS.on("close", () => log(`[${tag}] OpenAI closed`));
   aiWS.on("error", (err) => log(`[${tag}] OpenAI error:`, err));
 
-  // --- Twilio lifecycle ---
   twilioWS.on("message", (msg) => {
     const data = JSON.parse(msg.toString());
     if (data.event === "connected") log(`[${tag}] Twilio WS connected`);
