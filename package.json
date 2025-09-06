@@ -1,15 +1,14 @@
 {
-  "name": "barber-voice-min",
+  "name": "barber-ai-voice",
   "version": "1.0.0",
-  "description": "Absolute-min Twilio webhook that always talks",
+  "type": "module",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "render-build": "echo 'no build step'"
+    "start": "node server.js"
   },
   "dependencies": {
-    "body-parser": "^1.20.3",
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "twilio": "^4.23.0"
+    "ws": "^8.18.0"
   }
 }
