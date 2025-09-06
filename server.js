@@ -1,29 +1,31 @@
-// server.js  — minimal Realtime bridge (OpenAI -> Twilio), g711_ulaw @ 8000 Hz.
-// ES module style to match Render's "type":"module" environments.
+// server.js — minimal+safe Twilio <-> OpenAI Realtime bridge
+// Goals:
+// 1) PROVE WS upgrade happens (you'll see "HTTP upgrade for /twilio" then "Twilio WS connected")
+// 2) Keep call alive by sending µ-law silence immediately
+// 3) Then ask OpenAI to speak "Hello, I'm connected." and forward it
+// 4) Survive if OpenAI can't connect (silence keeps Twilio from hanging up)
 
 import express from "express";
 import http from "http";
 import WebSocket, { WebSocketServer } from "ws";
 
-// ---- Config (env) ----
 const PORT = process.env.PORT || 10000;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY; // required
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
 const OPENAI_REALTIME_MODEL =
   process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview-2024-12-17";
 
-// Basic checks
 if (!OPENAI_API_KEY) {
-  console.error("OPENAI_API_KEY is not set.");
+  console.error("FATAL: OPENAI_API_KEY is not set.");
   process.exit(1);
 }
 
-// ---- Express app ----
 const app = express();
 app.use(express.json());
 
+// Just to verify the service is up
 app.get("/health", (_req, res) => res.status(200).send("ok"));
 
-// Simple log endpoint for Twilio <Stream statusCallback>
+// Log Twilio statusCallback (start/error/stop)
 app.post("/twilio-status", (req, res) => {
   console.log("Twilio statusCallback:", JSON.stringify(req.body || {}, null, 2));
   res.sendStatus(200);
@@ -31,10 +33,11 @@ app.post("/twilio-status", (req, res) => {
 
 const server = http.createServer(app);
 
-// ---- WebSocket upgrade for Twilio Media Streams ----
+// ---- WS upgrade plumbing ----
 const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
+  console.log("HTTP upgrade requested for", req.url); // <== IMPORTANT
   if (req.url === "/twilio") {
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit("connection", ws, req);
@@ -44,18 +47,47 @@ server.on("upgrade", (req, socket, head) => {
   }
 });
 
-// ---- Connection handler: Twilio <-> OpenAI (outbound only) ----
+// ---- Utility: send µ-law silence frames (20ms chunks) ----
+// Twilio uses 8 kHz, µ-law; 20ms = 160 samples; silence byte is 0xFF
+const SILENCE_20MS_BASE64 = Buffer.alloc(160, 0xff).toString("base64");
+
+// Send N * 20ms silence frames back-to-back
+function sendSilenceFrames(ws, n = 10) {
+  for (let i = 0; i < n; i++) {
+    const frame = { event: "media", media: { payload: SILENCE_20MS_BASE64 } };
+    try {
+      ws.send(JSON.stringify(frame));
+    } catch (e) {
+      console.error("Error sending silence to Twilio:", e.message);
+      return;
+    }
+  }
+}
+
+// ---- Main connection handler ----
 wss.on("connection", (twilioWS) => {
   const tag = Math.random().toString(36).slice(2, 7);
-  console.log(`[${tag}] Twilio WS connected.`);
+  console.log(`[${tag}] Twilio WS connected`);
 
-  let openaiWS;
-  let openaiReady = false;
+  let openaiWS = null;
 
-  // 1) Open OpenAI Realtime WS
+  // Immediately start a silence ticker (keeps call open even if OpenAI is slow)
+  const silenceInterval = setInterval(() => {
+    sendSilenceFrames(twilioWS, 5); // 100ms of silence every tick
+  }, 100);
+
+  // Helper to clean up
+  const tidy = () => {
+    clearInterval(silenceInterval);
+    try { openaiWS?.close(); } catch {}
+    try { twilioWS?.close(); } catch {}
+  };
+
+  // Open OpenAI Realtime WS
   const openaiURL = `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
     OPENAI_REALTIME_MODEL
   )}`;
+  console.log(`[${tag}] Connecting to OpenAI WS…`);
   openaiWS = new WebSocket(openaiURL, {
     headers: {
       Authorization: `Bearer ${OPENAI_API_KEY}`,
@@ -64,64 +96,55 @@ wss.on("connection", (twilioWS) => {
   });
 
   openaiWS.on("open", () => {
-    console.log(`[${tag}] OpenAI WS open.`);
+    console.log(`[${tag}] OpenAI WS open`);
 
-    // 2) Configure the session for ulaw @ 8k and audio-only responses
+    // Configure session for µ-law at 8 kHz, audio-only
     const sessionUpdate = {
       type: "session.update",
       session: {
-        // No fancy voice name here; we just want audio bytes back
         modalities: ["audio"],
         input_audio_format: "g711_ulaw",
         response: {
           modalities: ["audio"],
           audio: { format: "g711_ulaw", sample_rate: 8000 },
         },
-        // Turn detection off for now; we’re only sending a fixed greeting back
         turn_detection: null,
       },
     };
     openaiWS.send(JSON.stringify(sessionUpdate));
-    openaiReady = true;
 
-    // 3) Ask OpenAI to speak a quick greeting immediately
+    // Ask OpenAI to speak something short
     const sayHello = {
       type: "response.create",
       response: {
         modalities: ["audio"],
-        instructions: "Hello, I’m connected.",
+        instructions: "Hello, I'm connected.",
       },
     };
     openaiWS.send(JSON.stringify(sayHello));
-    console.log(`[${tag}] Requested greeting from OpenAI.`);
+    console.log(`[${tag}] Requested greeting from OpenAI`);
   });
 
-  // 4) Forward OpenAI audio deltas to Twilio
+  // Forward OpenAI audio deltas to Twilio
   openaiWS.on("message", (buf) => {
     let msg;
     try {
       msg = JSON.parse(buf.toString());
     } catch {
-      // Occasionally OpenAI sends binary packets; ignore here
-      return;
+      return; // ignore binary or unknown
     }
 
-    // The current Realtime schema streams audio as "response.output_audio.delta"
     if (msg.type === "response.output_audio.delta" && msg.delta) {
-      // msg.delta is base64-encoded ulaw at 8k (we configured it that way)
-      const frame = {
-        event: "media",
-        media: { payload: msg.delta },
-      };
+      const frame = { event: "media", media: { payload: msg.delta } };
       try {
         twilioWS.send(JSON.stringify(frame));
       } catch (e) {
-        console.error(`[${tag}] Error sending media to Twilio:`, e.message);
+        console.error(`[${tag}] Error sending OpenAI audio to Twilio:`, e.message);
       }
     }
 
     if (msg.type === "response.completed") {
-      console.log(`[${tag}] OpenAI response completed.`);
+      console.log(`[${tag}] OpenAI response completed`);
     }
 
     if (msg.type === "error") {
@@ -136,46 +159,39 @@ wss.on("connection", (twilioWS) => {
     console.error(`[${tag}] OpenAI WS error:`, err.message);
   });
 
-  // 5) Handle Twilio messages (we ignore caller audio for now)
+  // Twilio inbound WS messages (we only log start/stop for this test)
   twilioWS.on("message", (data) => {
-    let m;
+    let msg;
     try {
-      m = JSON.parse(data.toString());
+      msg = JSON.parse(data.toString());
     } catch {
       return;
     }
-    if (m.event === "start") {
+    if (msg.event === "start") {
       console.log(
-        `[${tag}] Twilio start, streamSid: ${m.start?.streamSid}, from: ${m.start?.callSid || m.start?.from}`
+        `[${tag}] Twilio start: streamSid=${msg.start?.streamSid} from=${msg.start?.from}`
       );
-    } else if (m.event === "stop") {
+    } else if (msg.event === "stop") {
       console.log(`[${tag}] Twilio stop`);
-      try {
-        openaiWS?.close();
-      } catch {}
+      tidy();
     }
-    // We purposely do NOT forward media from Twilio yet.
   });
 
   twilioWS.on("close", () => {
     console.log(`[${tag}] Twilio WS closed`);
-    try {
-      openaiWS?.close();
-    } catch {}
+    tidy();
   });
-
   twilioWS.on("error", (err) => {
     console.error(`[${tag}] Twilio WS error:`, err.message);
+    tidy();
   });
 });
 
-// ---- Start server ----
+// ---- Boot ----
 server.listen(PORT, () => {
   console.log(`Server listening on ${PORT}`);
   console.log("=> Your service is live 🚀");
   console.log("=> ///////////////////////////////////////////////");
-  console.log(
-    "=> Available at your primary URL https://barber-ai.onrender.com"
-  );
+  console.log("=> Available at your primary URL https://barber-ai.onrender.com");
   console.log("=> ///////////////////////////////////////////////");
 });
