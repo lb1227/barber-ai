@@ -1,4 +1,4 @@
-// Minimal Twilio -> OpenAI Realtime TALK test
+// Minimal Twilio -> OpenAI Realtime TALK test (fixed session.type)
 // Goal: prove OpenAI can speak "Hello, you are connected to Barber AI."
 
 const http = require("http");
@@ -43,12 +43,13 @@ wss.on("connection", (twilioWS) => {
   aiWS.on("open", () => {
     log(`[${tag}] ✅ OpenAI WS open`);
 
-    // Tell it to use voice + μ-law output
+    // FIX: include session.type
     aiWS.send(JSON.stringify({
       type: "session.update",
       session: {
-        modalities: ["audio"],        // audio only
-        voice: "alloy",               // a valid voice
+        type: "realtime",
+        modalities: ["audio"],
+        voice: "alloy",                // must be one of alloy, ash, coral, etc
         output_audio_format: "g711_ulaw"
       }
     }));
