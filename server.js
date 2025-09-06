@@ -1,4 +1,4 @@
-// server.js - one-way TTS: OpenAI -> Twilio (no listening yet)
+// server.js - talk-only (OpenAI -> Twilio). Waits for session.updated, logs all events.
 const express = require("express");
 const http = require("http");
 const WebSocket = require("ws");
@@ -14,11 +14,8 @@ const app = express();
 const server = http.createServer(app);
 const wss = new WebSocket.Server({ server, path: "/media" });
 
-app.get("/", (_req, res) => {
-  res.type("text").send("OK");
-});
+app.get("/", (_req, res) => res.type("text").send("OK"));
 
-// Small helper to send Twilio media message
 function sendTwilioMedia(ws, streamSid, base64ULaw) {
   ws.send(
     JSON.stringify({
@@ -29,9 +26,9 @@ function sendTwilioMedia(ws, streamSid, base64ULaw) {
   );
 }
 
-// OpenAI realtime connection
 function connectOpenAI(onEvent, onOpen, onClose, onError) {
-  const url = "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17";
+  const url =
+    "wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17";
 
   const openai = new WebSocket(url, {
     headers: {
@@ -47,6 +44,7 @@ function connectOpenAI(onEvent, onOpen, onClose, onError) {
       onEvent(data);
     } catch (e) {
       console.error("[OpenAI] JSON parse error:", e);
+      console.error("raw:", msg.toString());
     }
   });
   openai.on("close", onClose);
@@ -57,76 +55,97 @@ function connectOpenAI(onEvent, onOpen, onClose, onError) {
 wss.on("connection", (twilio) => {
   let streamSid = null;
   let openai = null;
-  let openaiReady = false;
+  let sessionReady = false;
+  let greetingSent = false;
 
   console.log("==> Twilio connected");
 
-  twilio.on("message", async (msg) => {
+  twilio.on("message", (msg) => {
     let data;
     try {
       data = JSON.parse(msg.toString());
     } catch {
       return;
     }
-
     const { event } = data;
 
     if (event === "start") {
       streamSid = data.start.streamSid;
-      const mediaFormat = data.start.mediaFormat;
       console.log("==> Call started", {
         accountSid: data.start.accountSid,
         streamSid,
-        format: mediaFormat,
+        format: data.start.mediaFormat,
       });
 
-      // 1) Connect to OpenAI (audio only)
+      // Connect to OpenAI realtime
       openai = connectOpenAI(
         // onEvent
         (evt) => {
-          // We ONLY care about audio deltas and the completion
+          // Log everything for now so we see any problems
+          console.log("[OpenAI evt]", evt.type || evt);
+
+          // Session is ready -> now ask it to speak
+          if (evt.type === "session.updated") {
+            sessionReady = true;
+
+            if (!greetingSent) {
+              greetingSent = true;
+              openai.send(
+                JSON.stringify({
+                  type: "response.create",
+                  response: {
+                    modalities: ["audio"],             // audio only
+                    audio_format: "g711_ulaw",         // Twilio-compatible
+                    conversation: "none",              // don't store memory
+                    instructions:
+                      "Hi! This is the Barber AI. I'm just saying hello right now. Have a great day!",
+                  },
+                })
+              );
+              console.log("[OpenAI] greeting requested");
+            }
+          }
+
+          // Some builds send audio as response.audio.delta with {audio}
           if (evt.type === "response.audio.delta" && evt.audio) {
-            // evt.audio is base64 g711_ulaw chunk
             sendTwilioMedia(twilio, streamSid, evt.audio);
-          } else if (evt.type === "response.completed") {
+          }
+
+          // Some builds send response.output_audio.delta with {audio}
+          if (evt.type === "response.output_audio.delta" && evt.audio) {
+            sendTwilioMedia(twilio, streamSid, evt.audio);
+          }
+
+          // Some builds send chunks as buffer.append
+          if (
+            evt.type === "response.output_audio.buffer.append" &&
+            evt.audio
+          ) {
+            sendTwilioMedia(twilio, streamSid, evt.audio);
+          }
+
+          if (evt.type === "response.completed") {
             console.log("[OpenAI] response completed");
-            // Keep the line open; or close after short delay if you prefer:
-            // setTimeout(() => twilio.close(), 800);
+          }
+
+          if (evt.type === "error" || evt.error) {
+            console.error("[OpenAI ERROR]", evt);
           }
         },
         // onOpen
         () => {
           console.log("[OpenAI] WS open");
 
-          // 2) Configure the session: AUDIO ONLY, g711_ulaw out, no conversation
-          // NOTE: do NOT set session.response here (it was causing “unknown parameter”).
-          openaiReady = true;
+          // Do NOT send response.create yet; first update session
           openai.send(
             JSON.stringify({
               type: "session.update",
               session: {
-                // any stock voice here; 'verse' / 'alloy' / 'sage' etc.
-                voice: "verse",
-                // we only want audio out for now
-                modalities: ["audio"],
-                // sample rate & format for Twilio to match
+                // You can try different voices if you like
+                voice: "alloy",
+                modalities: ["audio"],       // only output audio
                 output_audio_format: "g711_ulaw",
-                // do not keep conversation memory
                 conversation: "none",
-              },
-            })
-          );
-
-          // 3) Ask OpenAI to speak a greeting (one-shot)
-          openai.send(
-            JSON.stringify({
-              type: "response.create",
-              response: {
-                modalities: ["audio"],
-                audio_format: "g711_ulaw",
-                conversation: "none",
-                instructions:
-                  "Hi! This is the Barber AI. I can hear you soon, but right now I'm just saying hello. Have a great day!",
               },
             })
           );
@@ -142,12 +161,8 @@ wss.on("connection", (twilio) => {
       );
     }
 
-    // Twilio “media” (inbound µ-law frames). We IGNORE these so there is no echo
-    // and no audio buffer commits. We are *talk only* for now.
-    if (event === "media") {
-      // no-op; we are not streaming input audio to OpenAI in this phase
-      return;
-    }
+    // Ignore inbound audio for now (talk-only)
+    if (event === "media") return;
 
     if (event === "stop") {
       console.log("==> Twilio stop (hangup)");
@@ -165,9 +180,7 @@ wss.on("connection", (twilio) => {
     } catch {}
   });
 
-  twilio.on("error", (err) => {
-    console.error("[Twilio WS] error", err);
-  });
+  twilio.on("error", (err) => console.error("[Twilio WS] error", err));
 });
 
 server.listen(PORT, () => {
