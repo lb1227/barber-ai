@@ -1,212 +1,163 @@
-// src/server.js
-/* eslint-disable no-console */
+// server.js  — CommonJS
+require('dotenv').config();
+
 const express = require('express');
 const http = require('http');
-const crypto = require('crypto');
-const bodyParser = require('body-parser');
-const WebSocket = require('ws');
-const cors = require('cors');
+const { WebSocketServer } = require('ws');
 
 const PORT = process.env.PORT || 10000;
-
-// ======= ENV you must set on Render =======
-// OPENAI_API_KEY
-// ==========================================
-
-const OPENAI_HOST = 'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview';
-const OPENAI_HEADERS = {
-  'Authorization': `Bearer ${process.env.OPENAI_API_KEY}`,
-  'OpenAI-Beta': 'realtime=v1'
-};
+const OPENAI_REALTIME_URL =
+  'wss://api.openai.com/v1/realtime?model=gpt-4o-realtime-preview-2024-12-17';
 
 const app = express();
-app.use(cors());
-app.use(bodyParser.json());
-app.use(bodyParser.urlencoded({ extended: false }));
 
-function log(...args) {
-  console.log(new Date().toLocaleString(), ...args);
-}
+// simple health probe
+app.get('/health', (_req, res) => res.status(200).send('ok'));
 
-app.get('/', (_req, res) => {
-  res.status(200).send('OK');
-});
-
-// Optional: Twilio status callbacks so you see stream errors in Render logs
-app.post('/twilio-status', (req, res) => {
-  log('Twilio status callback body:', JSON.stringify(req.body, null, 2));
-  res.sendStatus(200);
-});
-
-/**
- * Twilio <Stream> will connect here (wss://.../twilio)
- * We act as a bridge to OpenAI Realtime WS.
- */
-app.ws = function (server, path, handler) {
-  const wss = new WebSocket.Server({ server, path });
-  wss.on('connection', handler);
-  return wss;
-};
-
+// *** IMPORTANT: create a real HTTP server and attach ws to it ***
 const server = http.createServer(app);
 
-// Add WS support to Express
-require('express-ws')(app, server);
+// One WebSocket server that accepts Twilio <Stream> on path `/twilio`
+const twilioWSS = new WebSocketServer({ server, path: '/twilio' });
 
-// --------------- Twilio WS ---------------
-app.ws('/twilio', (twilioWS) => {
-  const streamSidRef = { current: null };
+twilioWSS.on('connection', (twilioWS, req) => {
+  console.log('Twilio WS connected. From:', req.socket.remoteAddress);
 
-  log('==> HTTP UPGRADE from Twilio OK');
-  // Create OpenAI Realtime WS
-  const openaiWS = new WebSocket(OPENAI_HOST, { headers: OPENAI_HEADERS });
+  // Open a Realtime WS to OpenAI
+  const openaiWS = new (require('ws'))(OPENAI_REALTIME_URL, {
+    headers: {
+      Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+      'OpenAI-Beta': 'realtime=v1',
+    },
+  });
 
-  // Audio batching state (we need ≥100ms before commit)
-  let pendingAudioSeq = 0;
-  let bufferedFrames = 0;        // how many ~20ms frames we’ve collected
-  let lastChunkId = null;        // the chunk_id we’ll commit when we reach 5
-  const TWILIO_FRAME_MS = 20;
-  const FRAMES_PER_COMMIT = Math.ceil(100 / TWILIO_FRAME_MS); // 5
+  let mediaStarted = false;
 
-  function sendToOpenAI(obj) {
-    if (openaiWS.readyState !== WebSocket.OPEN) return;
-    openaiWS.send(JSON.stringify(obj));
-  }
+  // ---- batching for ≥100ms (Twilio sends ~20ms PCMU frames) ----
+  const frameQueue = [];
+  let queuedMs = 0;
+  const FRAME_MS = 20;   // Twilio default
+  const COMMIT_MS = 100; // must be ≥ 100ms for OpenAI
 
-  function sendToTwilio(obj) {
-    if (twilioWS.readyState !== WebSocket.OPEN) return;
-    twilioWS.send(JSON.stringify(obj));
-  }
+  const flushAudioIfReady = () => {
+    if (queuedMs < COMMIT_MS || frameQueue.length === 0) return;
 
-  // -------- OpenAI events -> Twilio --------
-  openaiWS.on('open', () => {
-    log('OpenAI WS open');
-    // Configure the session to μ-law both ways, and a supported voice.
-    sendToOpenAI({
-      type: 'session.update',
-      session: {
-        // μ-law input from Twilio
-        input_audio_format: 'g711_ulaw',
-        // μ-law output back to Twilio
-        output_audio_format: 'g711_ulaw',
-        // a supported voice
-        voice: 'verse'
-      }
+    const combined = Buffer.concat(frameQueue);
+    const base64 = combined.toString('base64');
+
+    // Append and Commit to OpenAI
+    safeSend(openaiWS, {
+      type: 'input_audio_buffer.append',
+      audio: base64,
     });
 
-    // Kick off: create a response (audio + text) so the model can talk back
-    sendToOpenAI({
+    safeSend(openaiWS, { type: 'input_audio_buffer.commit' });
+
+    // Ask OpenAI to speak a short reply (keeps conversation flowing)
+    safeSend(openaiWS, {
       type: 'response.create',
       response: {
-        modalities: ['audio', 'text'], // IMPORTANT: include text + audio
-        instructions: "You're connected. Greet the caller briefly and listen."
-      }
+        modalities: ['audio', 'text'],
+        conversation: 'default',
+        instructions:
+          'You are a friendly phone agent. Keep replies short and conversational.',
+      },
+    });
+
+    frameQueue.length = 0;
+    queuedMs = 0;
+  };
+
+  const safeSend = (socket, obj) => {
+    if (socket && socket.readyState === socket.OPEN) {
+      socket.send(JSON.stringify(obj));
+    }
+  };
+
+  // When OpenAI WS opens, configure session & say hello
+  openaiWS.on('open', () => {
+    console.log('OpenAI WS open');
+
+    // Configure session: ulaw in/out, modalities audio+text, voice "verse"
+    safeSend(openaiWS, {
+      type: 'session.update',
+      session: {
+        input_audio_format: { type: 'g711_ulaw', sample_rate_hz: 8000 },
+        output_audio_format: { type: 'g711_ulaw', sample_rate_hz: 8000 },
+        modalities: ['audio', 'text'],
+        voice: 'verse',
+      },
+    });
+
+    // Greeting so caller hears something even before speaking
+    safeSend(openaiWS, {
+      type: 'response.create',
+      response: {
+        modalities: ['audio', 'text'],
+        conversation: 'default',
+        instructions:
+          'Say: "Hi—thanks for calling! I am connected and listening."',
+      },
     });
   });
 
-  // Forward OpenAI audio deltas to Twilio as μ-law media
-  openaiWS.on('message', (raw) => {
-    let msg;
-    try { msg = JSON.parse(raw.toString()); } catch (_) { return; }
-
-    // Audio deltas (OpenAI > Twilio)
-    if (msg.type === 'response.output_audio.delta' && msg.delta) {
-      // msg.delta is base64 μ-law because we set output_audio_format: g711_ulaw
-      sendToTwilio({
-        event: 'media',
-        streamSid: streamSidRef.current,
-        media: { payload: msg.delta }
-      });
-      return;
-    }
-
-    // Response completed: tell Twilio we’ve finished this burst of audio
-    if (msg.type === 'response.completed') {
-      sendToTwilio({ event: 'mark', streamSid: streamSidRef.current, mark: { name: 'openai_end_chunk' } });
-      return;
-    }
-
-    // Any errors from OpenAI — log them
-    if (msg.type === 'error') {
-      log('OpenAI ERROR:', JSON.stringify(msg, null, 2));
-      return;
-    }
+  openaiWS.on('message', (data) => {
+    // If you want to forward OpenAI audio back to Twilio, you’d decode/bridge here.
+    // For now we just log so we can stay focused on stabilizing the bridge.
+    try {
+      const msg = JSON.parse(data.toString());
+      // Debug minimal
+      if (msg.type === 'error') console.error('OpenAI ERROR:', msg);
+    } catch (_) {}
   });
 
-  openaiWS.on('close', () => log('OpenAI WS closed'));
-  openaiWS.on('error', (e) => log('OpenAI WS error:', e.message || e));
+  openaiWS.on('close', () => console.log('OpenAI WS closed'));
+  openaiWS.on('error', (err) => console.error('OpenAI WS error:', err));
 
-  // -------- Twilio events -> OpenAI --------
+  // Handle inbound Twilio messages
   twilioWS.on('message', (raw) => {
-    let msg;
-    try { msg = JSON.parse(raw.toString()); } catch (_) { return; }
-
-    if (msg.event === 'connected') {
-      log('Twilio event: connected');
+    let evt;
+    try {
+      evt = JSON.parse(raw.toString());
+    } catch {
       return;
     }
 
-    if (msg.event === 'start') {
-      streamSidRef.current = msg.start?.streamSid;
-      log('media START { streamSid:', streamSidRef.current, '}');
+    if (evt.event === 'start') {
+      console.log('Twilio media START:', evt.start?.streamSid);
+      mediaStarted = true;
       return;
     }
 
-    // Caller audio (μ-law base64)
-    if (msg.event === 'media') {
-      if (!msg.media || !msg.media.payload) return;
-
-      // Assign a chunk_id; 1 per frame
-      const chunkId = String(pendingAudioSeq++);
-      lastChunkId = chunkId;
-
-      // 1) append the 20ms frame
-      sendToOpenAI({
-        type: 'input_audio_buffer.append',
-        audio: msg.media.payload,     // base64 μ-law frame
-        chunk_id: chunkId
-      });
-
-      bufferedFrames += 1;
-
-      // 2) only commit after ≥100ms (5 frames)
-      if (bufferedFrames >= FRAMES_PER_COMMIT) {
-        sendToOpenAI({ type: 'input_audio_buffer.commit', chunk_id: lastChunkId });
-        bufferedFrames = 0;
-
-        // 3) Tell the model to respond (audio+text). This can be per commit,
-        //    or you can throttle if you want fewer responses.
-        sendToOpenAI({
-          type: 'response.create',
-          response: {
-            modalities: ['audio', 'text'],
-            instructions: 'Listen and respond briefly.'
-          }
-        });
-      }
+    if (evt.event === 'media' && mediaStarted) {
+      // Twilio payload is base64 PCMU; keep as bytes and batch for ≥100ms
+      const chunk = Buffer.from(evt.media.payload, 'base64');
+      frameQueue.push(chunk);
+      queuedMs += FRAME_MS;
+      flushAudioIfReady();
       return;
     }
 
-    if (msg.event === 'stop') {
-      log('media STOP');
+    if (evt.event === 'stop') {
+      console.log('Twilio media STOP');
+      flushAudioIfReady();
       try { openaiWS.close(); } catch (_) {}
+      try { twilioWS.close(); } catch (_) {}
       return;
     }
   });
 
   twilioWS.on('close', () => {
-    log('Twilio WS closed');
+    console.log('Twilio WS closed');
     try { openaiWS.close(); } catch (_) {}
   });
 
-  twilioWS.on('error', (e) => log('Twilio WS error:', e.message || e));
+  twilioWS.on('error', (err) => console.error('Twilio WS error:', err));
 });
 
-// Bring the server up
+// Start HTTP+WS server
 server.listen(PORT, () => {
-  log('Server listening on', PORT);
-  log('Your service is live 🎉');
-  log('//////////////////////////////////////////');
-  log('Available at your primary URL https://barber-ai.onrender.com');
-  log('//////////////////////////////////////////');
+  console.log('Server listening on', PORT);
+  console.log('Your service is live 🎉');
+  console.log('Available at your primary URL https://barber-ai.onrender.com');
 });
