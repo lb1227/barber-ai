@@ -1,17 +1,20 @@
 {
-  "name": "twilio-openai-realtime-bridge",
+  "name": "barber-ai-voice",
   "version": "1.0.0",
-  "description": "Minimal Twilio <-> OpenAI Realtime bridge for phone calls",
+  "description": "Simple Twilio <Gather> + OpenAI chat voice bot",
   "main": "server.js",
-  "type": "commonjs",
+  "type": "module",
   "scripts": {
-    "start": "node server.js"
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
   },
   "dependencies": {
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
-    "express-ws": "^5.0.2",
-    "ws": "^8.17.1",
-    "body-parser": "^1.20.2"
+    "openai": "^4.53.2",
+    "twilio": "^4.22.0"
   }
 }
