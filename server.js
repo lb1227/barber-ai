@@ -1,4 +1,8 @@
 // server.js — minimal "talk-only" bridge: Twilio -> OpenAI (outbound audio only)
+// Fixes:
+//   - session.update now includes session.type = "realtime"
+//   - wait for 'session.created' before sending response.create
+//   - adds 'OpenAI-Beta: realtime=v1' header
 
 const http = require("http");
 const express = require("express");
@@ -36,35 +40,29 @@ wss.on("connection", (twilioWS) => {
   // Connect to OpenAI Realtime WS
   const aiURL = `wss://api.openai.com/v1/realtime?model=${MODEL}`;
   const aiWS = new WebSocket(aiURL, {
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}` }
+    headers: {
+      Authorization: `Bearer ${OPENAI_API_KEY}`,
+      "OpenAI-Beta": "realtime=v1" // recommended beta header
+    }
   });
+
+  let sessionReady = false;
 
   aiWS.on("open", () => {
     log(`[${tag}] ✅ OpenAI WS open`);
 
-    // ✅ This is the CORRECT JSON shape. Notice "session: { ... }".
+    // ✅ Correct JSON shape + include required session.type = "realtime"
     const sessionUpdate = {
       type: "session.update",
       session: {
-        // optional "type": "realtime", // not required, kept minimal
-        voice: "alloy",
-        modalities: ["audio"],          // ✅ nested under session
+        type: "realtime",
+        voice: "alloy",               // choose any supported voice
+        modalities: ["audio"],        // nested under session
         output_audio_format: "g711_ulaw"
       }
     };
     log(`[${tag}] -> OpenAI`, sessionUpdate);
     aiWS.send(JSON.stringify(sessionUpdate));
-
-    // Ask OpenAI to speak one sentence (no input from caller)
-    const hello = {
-      type: "response.create",
-      response: {
-        instructions: "Hello, you are connected to Barber AI.",
-        modalities: ["audio"]          // ✅ nested under response
-      }
-    };
-    log(`[${tag}] -> OpenAI`, hello);
-    aiWS.send(JSON.stringify(hello));
   });
 
   // Any audio chunks from OpenAI -> send to Twilio MediaStream
@@ -72,9 +70,24 @@ wss.on("connection", (twilioWS) => {
     let data;
     try { data = JSON.parse(raw.toString()); } catch { return; }
 
-    // Log the first few messages to confirm structure clearly
+    // Log non-delta messages to see the protocol flow
     if (data.type !== "response.audio.delta") {
-      log(`[${tag}] <- OpenAI`, data.type);
+      log(`[${tag}] <- OpenAI`, data);
+    }
+
+    // Wait for session.created before asking the bot to speak
+    if (data.type === "session.created" && !sessionReady) {
+      sessionReady = true;
+
+      const hello = {
+        type: "response.create",
+        response: {
+          instructions: "Hello, you are connected to Barber AI.",
+          modalities: ["audio"]       // nested under response
+        }
+      };
+      log(`[${tag}] -> OpenAI`, hello);
+      aiWS.send(JSON.stringify(hello));
     }
 
     if (data.type === "response.audio.delta" && data.delta) {
@@ -107,7 +120,7 @@ wss.on("connection", (twilioWS) => {
     try {
       const data = JSON.parse(msg.toString());
       if (data.event === "connected") log(`[${tag}] Twilio WS connected`);
-      if (data.event === "start") log(`[${tag}] Twilio start`);
+      if (data.event === "start")     log(`[${tag}] Twilio start`);
       if (data.event === "stop") {
         log(`[${tag}] Twilio stop`);
         try { aiWS.close(); } catch {}
