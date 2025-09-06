@@ -1,20 +1,15 @@
 {
-  "name": "barber-ai-voice",
+  "name": "barber-voice-min",
   "version": "1.0.0",
-  "description": "Simple Twilio <Gather> + OpenAI chat voice bot",
+  "description": "Absolute-min Twilio webhook that always talks",
   "main": "server.js",
-  "type": "module",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
-  },
-  "engines": {
-    "node": ">=18"
+    "render-build": "echo 'no build step'"
   },
   "dependencies": {
-    "dotenv": "^16.4.5",
+    "body-parser": "^1.20.3",
     "express": "^4.19.2",
-    "openai": "^4.53.2",
-    "twilio": "^4.22.0"
+    "twilio": "^4.23.0"
   }
 }
