@@ -1,3 +1,5 @@
+// server.js — minimal "talk-only" bridge: Twilio -> OpenAI (outbound audio only)
+
 const http = require("http");
 const express = require("express");
 const WebSocket = require("ws");
@@ -13,10 +15,10 @@ if (!OPENAI_API_KEY) {
 
 const app = express();
 app.get("/", (_, res) => res.send("OK"));
-
 const server = http.createServer(app);
-const wss = new WebSocket.Server({ noServer: true });
 
+// Twilio will connect its MediaStreams WebSocket to /media
+const wss = new WebSocket.Server({ noServer: true });
 server.on("upgrade", (req, socket, head) => {
   if (req.url === "/media") {
     wss.handleUpgrade(req, socket, head, ws => wss.emit("connection", ws, req));
@@ -31,6 +33,7 @@ wss.on("connection", (twilioWS) => {
   const tag = Math.random().toString(36).slice(2, 6);
   log(`[${tag}] Twilio connected`);
 
+  // Connect to OpenAI Realtime WS
   const aiURL = `wss://api.openai.com/v1/realtime?model=${MODEL}`;
   const aiWS = new WebSocket(aiURL, {
     headers: { Authorization: `Bearer ${OPENAI_API_KEY}` }
@@ -39,31 +42,43 @@ wss.on("connection", (twilioWS) => {
   aiWS.on("open", () => {
     log(`[${tag}] ✅ OpenAI WS open`);
 
-    // Correct session.update
-    aiWS.send(JSON.stringify({
+    // ✅ This is the CORRECT JSON shape. Notice "session: { ... }".
+    const sessionUpdate = {
       type: "session.update",
       session: {
-        type: "realtime",
-        modalities: ["audio"],         // ✅ INSIDE session
+        // optional "type": "realtime", // not required, kept minimal
         voice: "alloy",
+        modalities: ["audio"],          // ✅ nested under session
         output_audio_format: "g711_ulaw"
       }
-    }));
+    };
+    log(`[${tag}] -> OpenAI`, sessionUpdate);
+    aiWS.send(JSON.stringify(sessionUpdate));
 
-    // Minimal hello response
-    aiWS.send(JSON.stringify({
+    // Ask OpenAI to speak one sentence (no input from caller)
+    const hello = {
       type: "response.create",
       response: {
         instructions: "Hello, you are connected to Barber AI.",
-        modalities: ["audio"]          // ✅ INSIDE response
+        modalities: ["audio"]          // ✅ nested under response
       }
-    }));
+    };
+    log(`[${tag}] -> OpenAI`, hello);
+    aiWS.send(JSON.stringify(hello));
   });
 
-  aiWS.on("message", (msg) => {
-    const data = JSON.parse(msg.toString());
+  // Any audio chunks from OpenAI -> send to Twilio MediaStream
+  aiWS.on("message", (raw) => {
+    let data;
+    try { data = JSON.parse(raw.toString()); } catch { return; }
+
+    // Log the first few messages to confirm structure clearly
+    if (data.type !== "response.audio.delta") {
+      log(`[${tag}] <- OpenAI`, data.type);
+    }
 
     if (data.type === "response.audio.delta" && data.delta) {
+      // Twilio expects: { event: "media", media: { payload: base64-ULAW } }
       twilioWS.send(JSON.stringify({
         event: "media",
         media: { payload: data.delta }
@@ -72,10 +87,11 @@ wss.on("connection", (twilioWS) => {
 
     if (data.type === "response.completed") {
       log(`[${tag}] ✅ AI finished speaking`);
+      // give Twilio a moment to flush audio
       setTimeout(() => {
         try { twilioWS.close(); } catch {}
         try { aiWS.close(); } catch {}
-      }, 500);
+      }, 400);
     }
 
     if (data.type === "error") {
@@ -86,15 +102,18 @@ wss.on("connection", (twilioWS) => {
   aiWS.on("close", () => log(`[${tag}] OpenAI closed`));
   aiWS.on("error", (err) => log(`[${tag}] OpenAI error:`, err));
 
+  // We don't forward caller audio yet; we only let the bot speak.
   twilioWS.on("message", (msg) => {
-    const data = JSON.parse(msg.toString());
-    if (data.event === "connected") log(`[${tag}] Twilio WS connected`);
-    if (data.event === "start") log(`[${tag}] Twilio start`);
-    if (data.event === "stop") {
-      log(`[${tag}] Twilio stop`);
-      aiWS.close();
-      twilioWS.close();
-    }
+    try {
+      const data = JSON.parse(msg.toString());
+      if (data.event === "connected") log(`[${tag}] Twilio WS connected`);
+      if (data.event === "start") log(`[${tag}] Twilio start`);
+      if (data.event === "stop") {
+        log(`[${tag}] Twilio stop`);
+        try { aiWS.close(); } catch {}
+        try { twilioWS.close(); } catch {}
+      }
+    } catch (_) {}
   });
 
   twilioWS.on("close", () => log(`[${tag}] Twilio closed`));
@@ -102,5 +121,5 @@ wss.on("connection", (twilioWS) => {
 });
 
 server.listen(PORT, () => {
-  console.log("==> Minimal server live at", `https://barber-ai.onrender.com`);
+  console.log("==> Minimal WS server ready at https://barber-ai.onrender.com");
 });
