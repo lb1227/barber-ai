@@ -1,6 +1,5 @@
-// server.js — Twilio <-> OpenAI Realtime (g711 μ-law) telephony bridge
+// Twilio <-> OpenAI Realtime (μ-law) bridge
 // Env: OPENAI_API_KEY (and optionally OPENAI_MODEL)
-// TwiML <Connect><Stream url="wss://<your-app>/media" /></Connect>
 
 const http = require("http");
 const express = require("express");
@@ -11,10 +10,10 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPENAI_KEY;
 const OPENAI_MODEL =
   process.env.OPENAI_MODEL || "gpt-4o-realtime-preview-2024-12-17";
 
-// μ-law @ 8kHz: 1 byte per sample => ~8 bytes/ms
+// μ-law @ 8kHz => 1 byte/sample => 8 bytes/ms
 const SAMPLE_RATE = 8000;
 const BYTES_PER_MS = SAMPLE_RATE / 1000; // 8
-const COMMIT_MS = 120; // >= 100ms to satisfy Realtime minimum nicely
+const COMMIT_MS = 120;                               // ≥100ms required by API
 const MIN_BYTES_PER_COMMIT = Math.ceil(BYTES_PER_MS * COMMIT_MS); // ~960
 
 const app = express();
@@ -44,11 +43,12 @@ function joinBuffers(parts) {
 wss.on("connection", (twilioWS) => {
   let streamSid = null;
 
-  // Buffer inbound Twilio μ-law
+  // buffer incoming Twilio μ-law frames
   let inboundChunks = [];
+  let gotAudioSinceLastCommit = false;
   let lastFlush = Date.now();
 
-  // OpenAI Realtime WS
+  // connect to OpenAI realtime
   const oaWS = new WebSocket(
     `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(OPENAI_MODEL)}`,
     {
@@ -59,31 +59,29 @@ wss.on("connection", (twilioWS) => {
     }
   );
 
-  // Flush >=100ms μ-law to OpenAI (append+commit)
+  // Periodic flush: append + commit only if we truly have ≥120ms since last commit
   const flushTimer = setInterval(() => {
     if (oaWS.readyState !== WebSocket.OPEN) return;
 
     const elapsed = Date.now() - lastFlush;
     const totalBytes = inboundChunks.reduce((n, b) => n + b.length, 0);
 
-    // Only flush if we actually have >=100ms audio AND the interval elapsed
-    if (totalBytes >= MIN_BYTES_PER_COMMIT && elapsed >= COMMIT_MS) {
+    if (gotAudioSinceLastCommit && totalBytes >= MIN_BYTES_PER_COMMIT && elapsed >= COMMIT_MS) {
       const buf = joinBuffers(inboundChunks);
-      inboundChunks = [];
-      lastFlush = Date.now();
+      if (buf.length >= MIN_BYTES_PER_COMMIT) {
+        inboundChunks = [];
+        lastFlush = Date.now();
+        gotAudioSinceLastCommit = false;
 
-      // Append μ-law audio
-      oaWS.send(JSON.stringify({
-        type: "input_audio_buffer.append",
-        audio: b64(buf)
-        // session.input_audio_format is already g711_ulaw, so we don't
-        // need to restate it here.
-      }));
+        oaWS.send(JSON.stringify({
+          type: "input_audio_buffer.append",
+          audio: b64(buf) // μ-law bytes
+        }));
 
-      // Commit ONLY after we appended bytes
-      oaWS.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+        oaWS.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
+      }
     }
-  }, Math.max(20, COMMIT_MS / 2));
+  }, Math.max(40, COMMIT_MS / 2));
 
   function sendToTwilioUlaw(base64Payload) {
     if (twilioWS.readyState !== WebSocket.OPEN || !streamSid) return;
@@ -108,7 +106,10 @@ wss.on("connection", (twilioWS) => {
 
     if (event === "media") {
       const payload = data.media?.payload;
-      if (payload) inboundChunks.push(Buffer.from(payload, "base64"));
+      if (payload) {
+        inboundChunks.push(Buffer.from(payload, "base64"));
+        gotAudioSinceLastCommit = true;
+      }
       return;
     }
 
@@ -126,7 +127,7 @@ wss.on("connection", (twilioWS) => {
   });
   twilioWS.on("error", (e) => console.error("[Twilio] WS error", e));
 
-  // keep-alive marks so Twilio doesn't close early
+  // keep-alive so Twilio doesn’t time us out
   const markTimer = setInterval(() => {
     if (twilioWS.readyState === WebSocket.OPEN && streamSid) {
       safeSend(twilioWS, { event: "mark", streamSid, mark: { name: "alive" } });
@@ -138,7 +139,7 @@ wss.on("connection", (twilioWS) => {
   oaWS.on("open", () => {
     console.log("[OpenAI] WS open");
 
-    // Configure μ-law in/out + voice + system instructions
+    // Configure formats & voice ON THE SESSION
     oaWS.send(JSON.stringify({
       type: "session.update",
       session: {
@@ -146,18 +147,17 @@ wss.on("connection", (twilioWS) => {
         output_audio_format: "g711_ulaw",
         voice: "verse",
         instructions:
-          "You are a friendly barber shop assistant. Answer briefly and naturally. Ask helpful follow-up questions when needed."
+          "You are a friendly barbershop assistant. Answer briefly and naturally. Ask helpful follow-up questions when needed."
       },
     }));
 
-    // Immediate greeting (NOTE: 'audio' must be TOP-LEVEL, not inside 'response')
+    // First spoken greeting — NO top-level 'audio' (that's invalid)
     oaWS.send(JSON.stringify({
       type: "response.create",
       response: {
         modalities: ["audio"],
         instructions: "Hi! Thanks for calling the barbershop, how can I help you today?"
-      },
-      audio: { voice: "verse" }
+      }
     }));
   });
 
@@ -172,10 +172,6 @@ wss.on("connection", (twilioWS) => {
 
       case "output_audio_buffer.append":
         if (evt.audio) sendToTwilioUlaw(evt.audio);
-        break;
-
-      case "response.completed":
-        // you can queue another response here if you want
         break;
 
       case "error":
