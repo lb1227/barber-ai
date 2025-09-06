@@ -1,5 +1,3 @@
-// Minimal Twilio -> OpenAI Realtime TALK test (corrected keys)
-
 const http = require("http");
 const express = require("express");
 const WebSocket = require("ws");
@@ -41,23 +39,23 @@ wss.on("connection", (twilioWS) => {
   aiWS.on("open", () => {
     log(`[${tag}] ✅ OpenAI WS open`);
 
-    // Correct session.update structure
+    // Correct session.update
     aiWS.send(JSON.stringify({
       type: "session.update",
       session: {
         type: "realtime",
-        modalities: ["audio"],       // ✅ correct location
-        voice: "alloy",              // must be alloy, ash, coral, etc
+        modalities: ["audio"],         // ✅ INSIDE session
+        voice: "alloy",
         output_audio_format: "g711_ulaw"
       }
     }));
 
-    // Minimal "hello" test
+    // Minimal hello response
     aiWS.send(JSON.stringify({
       type: "response.create",
       response: {
         instructions: "Hello, you are connected to Barber AI.",
-        modalities: ["audio"]        // ✅ correct location
+        modalities: ["audio"]          // ✅ INSIDE response
       }
     }));
   });
@@ -66,7 +64,6 @@ wss.on("connection", (twilioWS) => {
     const data = JSON.parse(msg.toString());
 
     if (data.type === "response.audio.delta" && data.delta) {
-      // forward audio chunks to Twilio
       twilioWS.send(JSON.stringify({
         event: "media",
         media: { payload: data.delta }
@@ -74,7 +71,7 @@ wss.on("connection", (twilioWS) => {
     }
 
     if (data.type === "response.completed") {
-      log(`[${tag}] ✅ Response completed`);
+      log(`[${tag}] ✅ AI finished speaking`);
       setTimeout(() => {
         try { twilioWS.close(); } catch {}
         try { aiWS.close(); } catch {}
