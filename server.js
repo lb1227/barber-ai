@@ -170,7 +170,8 @@ wss.on("connection", (twilioWS) => {
           type: "response.create",
           response: {
             instructions: "Hello from Barber AI. If you can hear this, the OpenAI link works.",
-            modalities: ["audio", "text"],  // fine to keep, but no voice/audio here
+            modalities: ["audio", "text"],
+            conversation: "none",                  // ← force a fresh turn
           },
         });
         return;
