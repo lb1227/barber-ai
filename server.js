@@ -161,8 +161,6 @@ wss.on("connection", (twilioWS) => {
           type: "response.create",
           response: { modalities: ["audio", "text"], conversation: "auto" }, // or omit
         });
-      }
-
       } else if (msg.type === "error") {
         console.error("[OpenAI ERROR]", msg);
       }
@@ -170,6 +168,7 @@ wss.on("connection", (twilioWS) => {
       console.error("OpenAI message parse error", e);
     }
   });
+
 
   // ---- Twilio inbound ------------------------------------------------------
   twilioWS.on("message", (raw) => {
