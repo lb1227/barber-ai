@@ -125,7 +125,6 @@ wss.on("connection", (twilioWS) => {
           JSON.stringify({
             type: "response.create",
             response: {
-              modalities: ["audio"],
               instructions:
                 "Hello from Barber AI. If you can hear this, the OpenAI link works.",
             },
