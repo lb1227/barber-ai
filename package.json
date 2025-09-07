@@ -1,14 +1,10 @@
 {
-  "name": "barber-ai-minimal-rt",
+  "name": "barber-ai-voice-min",
   "version": "1.0.0",
-  "description": "Minimal Twilio <-> OpenAI Realtime: one-way TTS to caller",
-  "main": "server.js",
+  "private": true,
   "type": "module",
   "scripts": {
-    "start": "node server.js"
-  },
-  "engines": {
-    "node": ">=18"
+    "start": "node src/server.js"
   },
   "dependencies": {
     "express": "^4.19.2",
