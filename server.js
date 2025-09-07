@@ -140,7 +140,6 @@ wss.on("connection", (twilioWS) => {
   openaiWS.on("message", (data) => {
     try {
       const msg = JSON.parse(data.toString());
-      // Temporary: see everything OpenAI is sending
       if (!["response.output_audio.delta", "error"].includes(msg.type)) {
         console.log("[OpenAI EVENT]", msg.type, JSON.stringify(msg).slice(0, 400));
       }
@@ -149,14 +148,25 @@ wss.on("connection", (twilioWS) => {
         (msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") &&
         (msg.audio || msg.delta)
       ) {
-        isSpeaking = true; // TTS in progress
-        const payload = msg.audio || msg.delta; // base64 G.711 μ-law
+        isSpeaking = true;
+        const payload = msg.audio || msg.delta;
         safeSendTwilio({ event: "media", media: { payload } });
         if (streamSid) {
           safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
         }
       } else if (msg.type === "response.audio.done") {
-        isSpeaking = false; // TTS finished
+        isSpeaking = false;
+  
+      } else if (msg.type === "response.done") {
+        // ✅ Greeting finished the first time; for subsequent turns, unlock queuing the next response
+        if (!hasSeenFirstResponseDone) {
+          hasSeenFirstResponseDone = true;
+          console.log("[State] Greeting completed");
+        } else {
+          // A normal assistant turn ended → allow queuing a response on next user speech
+          hasQueuedResponse = false;
+        }
+  
       } else if (msg.type === "error") {
         console.error("[OpenAI ERROR]", msg);
       }
@@ -166,47 +176,42 @@ wss.on("connection", (twilioWS) => {
   });
 
 
+
   // ---- Twilio inbound ------------------------------------------------------
   twilioWS.on("message", (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
   
-      if (msg.event === "connected") {
-        console.log("[Twilio] connected message:", msg.protocol, msg.version);
-        return;
-      }
-
       if (msg.event === "media") {
-        // Optional barge-in
-        if (isSpeaking) {
-          safeSendOpenAI({ type: "response.cancel" });
-          isSpeaking = false;
-          // Don't queue here; we'll queue when we see inbound speech below.
-        }
-      
-        const b64 = msg.media?.payload;
-        if (b64) {
-          hasInboundAudio = true;
-          const decodedLen = Buffer.from(b64, "base64").length; // ✅ decoded bytes
-          inboundBytes += decodedLen;
-      
-          // If greeting finished and we haven't queued a responder yet, do it now.
-          if (hasSeenFirstResponseDone && !hasQueuedResponse) {
-            safeSendOpenAI({
-              type: "response.create",
-              response: { modalities: ["audio", "text"], conversation: "auto" },
-            });
-            hasQueuedResponse = true;
-          }
-      
-          // Append caller audio
-          safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
-      
-          // Ensure the commit timer is running (lazy start)
-          startCommitTimerIfNeeded();
-        }
-        return;
+      if (isSpeaking) {
+        safeSendOpenAI({ type: "response.cancel" });
+        isSpeaking = false;
       }
+    
+      const b64 = msg.media?.payload;
+      if (b64) {
+        hasInboundAudio = true;
+        const decodedLen = Buffer.from(b64, "base64").length;
+        inboundBytes += decodedLen;
+    
+        if (hasSeenFirstResponseDone && !hasQueuedResponse) {
+          safeSendOpenAI({
+            type: "response.create",
+            response: { modalities: ["audio", "text"], conversation: "auto" },
+          });
+          hasQueuedResponse = true;
+        }
+    
+        safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
+    
+        // ✅ We appended fresh audio → a commit is now warranted when threshold is reached
+        pendingCommit = true;
+    
+        startCommitTimerIfNeeded();
+      }
+      return;
+    }
+
 
 
   
