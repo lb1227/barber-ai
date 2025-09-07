@@ -113,7 +113,6 @@ wss.on("connection", (twilioWS) => {
       type: "session.update",
       session: {
         modalities: ["text", "audio"],
-        voice: "alloy",
         output_audio_format: "g711_ulaw",
       },
     });
