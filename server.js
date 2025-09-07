@@ -19,7 +19,7 @@ const server = http.createServer((req, res) => {
       <Response>
         <Say voice="alice">Connecting you to Barber A I.</Say>
         <Connect>
-          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" />
+          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" track="both" />
         </Connect>
       </Response>
     `.trim();
