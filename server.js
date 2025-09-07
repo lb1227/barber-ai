@@ -114,6 +114,8 @@ wss.on("connection", (twilioWS) => {
         modalities: ["text", "audio"],
         voice: "alloy",                // ✅ supported here
         output_audio_format: "g711_ulaw",
+        instructions:
+          "You are Barber AI. Always speak concise US English for phone calls."
       },
     });
   
@@ -169,7 +171,7 @@ wss.on("connection", (twilioWS) => {
         safeSendOpenAI({
           type: "response.create",
           response: {
-            instructions: "Hello from Barber AI. If you can hear this, the OpenAI link works.",
+            instructions: "Say exactly: 'Hello from Barber AI. If you can hear this, the OpenAI link works.'",
             modalities: ["audio", "text"],
             conversation: "none",                  // ← force a fresh turn
           },
