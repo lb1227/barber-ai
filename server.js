@@ -155,12 +155,6 @@ wss.on("connection", (twilioWS) => {
         }
       } else if (msg.type === "response.audio.done") {
         isSpeaking = false; // TTS finished
-      } else if (msg.type === "response.done") {
-        // Prepare the next turn so it will answer after the next user speech
-        safeSendOpenAI({
-          type: "response.create",
-          response: { modalities: ["audio", "text"], conversation: "auto" }, // or omit
-        });
       } else if (msg.type === "error") {
         console.error("[OpenAI ERROR]", msg);
       }
@@ -191,11 +185,12 @@ wss.on("connection", (twilioWS) => {
         const b64 = msg.media?.payload;
         if (b64) {
           hasInboundAudio = true; // <-- we have audio now
-          inboundBytes += Buffer.byteLength(b64, "base64");
+          inboundBytes += Buffer.from(b64, "base64").length;
           safeSendOpenAI({
             type: "input_audio_buffer.append",
             audio: b64, // base64 G.711 μ-law
           });
+          startCommitTimerIfNeeded();
         }
         return;
       }
@@ -246,17 +241,28 @@ wss.on("connection", (twilioWS) => {
 
 
   // cleanup helper now handles an optional timer
-  const BYTES_PER_100MS = 800; // μ-law: 8k samples/s * 1 byte * 0.1s
+  const BYTES_PER_100MS = 800; // μ-law: 8kHz * 1 byte/sample * 0.1s
   const COMMIT_MS = 200;
+  let commitTimer = null;
   
-  const commitTimer = setInterval(() => {
-    if (!hasInboundAudio) return; // <-- don't commit until we see audio
-    if (openaiWS.readyState === WebSocket.OPEN && inboundBytes >= BYTES_PER_100MS) {
-      // ~100ms of audio buffered; commit so VAD can detect end-of-turn
-      safeSendOpenAI({ type: "input_audio_buffer.commit" });
-      inboundBytes = 0;
+  function startCommitTimerIfNeeded() {
+    if (commitTimer) return;
+    commitTimer = setInterval(() => {
+      if (!hasInboundAudio) return;
+      if (openaiWS.readyState === WebSocket.OPEN && inboundBytes >= BYTES_PER_100MS) {
+        console.log("[Commit] sending input_audio_buffer.commit with", inboundBytes, "bytes");
+        safeSendOpenAI({ type: "input_audio_buffer.commit" });
+        inboundBytes = 0;
+      }
+    }, COMMIT_MS);
+  }
+  
+  function stopCommitTimer() {
+    if (commitTimer) {
+      clearInterval(commitTimer);
+      commitTimer = null;
     }
-  }, COMMIT_MS);
+  }
   
   
   const cleanup = () => {
