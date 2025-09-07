@@ -79,15 +79,16 @@ wss.on("connection", (twilioWS) => {
 
   openaiWS.on("open", () => {
     console.log("[OpenAI] WS open");
-
+  
     // Prime the session
     openaiWS.send(
       JSON.stringify({
         type: "session.update",
         session: {
-          modalities: ["text", "audio"],
-          voice: "alloy",
-          output_audio_format: "g711_ulaw",
+          modalities: ["text", "audio"],       // we want both text + audio
+          voice: "alloy",                      // voice to use
+          output_audio_format: { type: "g711_ulaw" }, // correct object form for Twilio
+          // ❌ no input_audio_format yet (we’re not streaming caller audio now)
         },
       })
     );
@@ -114,41 +115,42 @@ wss.on("connection", (twilioWS) => {
   twilioWS.on("message", (raw) => {
     try {
       const msg = JSON.parse(raw.toString());
-
+  
       if (msg.event === "start") {
         console.log("[Twilio] stream start:", msg.start.streamSid);
         twilioReady = true;
-        flushPendingAudio();
-
-        // Now it is safe to ask OpenAI to speak
-        openaiWS.send(
-          JSON.stringify({
-            type: "response.create",
-            response: {
-              instructions:
-                "Hello from Barber AI. If you can hear this, the OpenAI link works.",
-            },
-          })
-        );
+        flushPendingAudio?.();
+  
+        // Ask OpenAI to speak immediately
+        openaiWS.send(JSON.stringify({
+          type: "response.create",
+          response: {
+            instructions: "Hello from Barber AI. If you can hear this, the OpenAI link works.",
+          },
+        }));
+        return;
       }
-
-      else if (msg.event === "media") {
-        // Optional: forward caller audio to OpenAI input buffer
-        if (openaiWS.readyState === WebSocket.OPEN) {
-          openaiWS.send(
-            JSON.stringify({
-              type: "input_audio_buffer.append",
-              audio: msg.media.payload, // base64 G.711 μ-law
-            })
-          );
+  
+      // MEDIA HANDLING DISABLED (uncomment later for two-way)
+      /*
+      if (msg.event === "media") {
+        if (openaiWS && openaiWS.readyState === openaiWS.OPEN) {
+          openaiWS.send(JSON.stringify({
+            type: "input_audio_buffer.append",
+            audio: msg.media.payload, // base64 G.711 μ-law
+          }));
         }
+        return;
       }
-
-      else if (msg.event === "stop") {
+      */
+  
+      if (msg.event === "stop") {
         console.log("[Twilio] stop");
-        safeClose(openaiWS);
-        safeClose(twilioWS);
+        safeClose?.(openaiWS);
+        safeClose?.(twilioWS);
+        return;
       }
+  
     } catch (e) {
       console.error("Twilio message parse error", e);
     }
