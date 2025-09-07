@@ -4,7 +4,7 @@ import { WebSocketServer, WebSocket } from "ws";
 const PORT = process.env.PORT || 10000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REALTIME_MODEL =
-  process.env.OPENAI_REALTIME_MODEL || "gpt-realtime";
+  process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview";
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY env var");
