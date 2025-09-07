@@ -133,17 +133,13 @@ wss.on("connection", (twilioWS) => {
         console.log("[OpenAI EVENT]", msg.type, JSON.stringify(msg).slice(0, 400));
       }
   
-      if (msg.type === "response.output_audio.delta" && msg.audio) {
-        safeSendTwilio({
-          event: "media",
-          media: { payload: msg.audio },  // base64 g.711 μ-law
-        });
-        // Optional: ask Twilio to tell us when it's done playing this chunk
-        safeSendTwilio({
-          event: "mark",
-          streamSid,
-          mark: { name: "chunk" }
-        });
+      if (
+        (msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") &&
+        (msg.audio || msg.delta)
+      ) {
+        const payload = msg.audio || msg.delta; // base64 G.711 μ-law
+        safeSendTwilio({ event: "media", media: { payload } });
+        safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
       } else if (msg.type === "error") {
         console.error("[OpenAI ERROR]", msg);
       }
