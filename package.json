@@ -1,13 +1,14 @@
 {
-  "name": "barber-ai-voice-min",
+  "name": "barber-ai",
   "version": "1.0.0",
-  "private": true,
+  "description": "Minimal OpenAI <-> Twilio Media Streams bridge",
+  "main": "server.js",
   "type": "module",
+  "engines": { "node": ">=20" },
   "scripts": {
-    "start": "node src/server.js"
+    "start": "node server.js"
   },
   "dependencies": {
-    "express": "^4.19.2",
-    "ws": "^8.18.0"
+    "ws": "^8.17.0"
   }
 }
