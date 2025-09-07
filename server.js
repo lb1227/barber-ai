@@ -108,17 +108,19 @@ wss.on("connection", (twilioWS) => {
   
   openaiWS.on("open", () => {
     console.log("[OpenAI] WS open");
-    // Set session; output_audio_format must be a STRING (header also set)
     safeSendOpenAI({
       type: "session.update",
       session: {
         modalities: ["text", "audio"],
+        voice: "alloy",                // ✅ supported here
         output_audio_format: "g711_ulaw",
       },
     });
-    // Flush any queued messages
+  
+    // Flush queued messages
     while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
   });
+
 
   // Forward OpenAI audio -> Twilio (buffer until Twilio ready)
   openaiWS.on("message", (data) => {
@@ -168,8 +170,7 @@ wss.on("connection", (twilioWS) => {
           type: "response.create",
           response: {
             instructions: "Hello from Barber AI. If you can hear this, the OpenAI link works.",
-            modalities: ["audio","text"],
-            audio: { voice: "alloy" } 
+            modalities: ["audio", "text"],  // fine to keep, but no voice/audio here
           },
         });
         return;
