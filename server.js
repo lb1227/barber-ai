@@ -150,14 +150,18 @@ wss.on("connection", (twilioWS) => {
     }
   });
 
-  // Commit input audio regularly so OpenAI consumes it
-  const commitTimer = setInterval(() => {
-    if (openaiWS.readyState === WebSocket.OPEN) {
-      openaiWS.send(JSON.stringify({ type: "input_audio_buffer.commit" }));
-    }
-  }, 250);
+ let commitTimer; // declare up top in the scope with twilioWS/openaiWS
 
-  const cleanup = () => clearInterval(commitTimer);
+// ... inside openaiWS.on("open", ...) after your session.update + flush:
+commitTimer = setInterval(() => {
+  // use the guarded sender so we never call send while CONNECTING
+  safeSendOpenAI({ type: "input_audio_buffer.commit" });
+}, 250);
+
+// cleanup helper now handles an optional timer
+const cleanup = () => {
+  try { if (commitTimer) clearInterval(commitTimer); } catch {}
+};
 
   twilioWS.on("close", () => {
     console.log("[Twilio] closed");
