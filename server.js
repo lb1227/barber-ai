@@ -11,10 +11,28 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
+const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
+
 const server = http.createServer((req, res) => {
+  if (req.url === "/voice") {
+    const twiml = `
+      <Response>
+        <Say voice="alice">Connecting you to Barber A I.</Say>
+        <Connect>
+          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" />
+        </Connect>
+      </Response>
+    `.trim();
+
+    res.writeHead(200, { "Content-Type": "text/xml" });
+    return res.end(twiml);
+  }
+
+  // default health check
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("Barber AI Realtime bridge is alive.\n");
 });
+
 
 const wss = new WebSocketServer({ noServer: true });
 
@@ -32,15 +50,19 @@ wss.on("connection", (twilioWS) => {
   console.log("[Twilio] connected");
 
   // ---- state/guards --------------------------------------------------------
-  let twilioReady = false;               // set true after we get Twilio 'start'
-  const pendingAudio = [];               // buffer OpenAI audio until Twilio ready
-
+  // AFTER
+  let twilioReady = false;
+  let streamSid = null;                  // NEW: track stream SID
+  const pendingAudio = [];
+  
   const safeSendTwilio = (msgObj) => {
-    if (!twilioReady) {
-      if (msgObj && msgObj.event === "media") {
-        pendingAudio.push(msgObj);       // buffer only audio frames before ready
-      }
+    if (!twilioReady || !streamSid) {
+      if (msgObj?.event === "media") pendingAudio.push(msgObj);
       return;
+    }
+    // ensure streamSid is on every media frame
+    if (msgObj?.event === "media" && !msgObj.streamSid) {
+      msgObj.streamSid = streamSid;
     }
     if (twilioWS.readyState === WebSocket.OPEN) {
       try {
@@ -54,14 +76,11 @@ wss.on("connection", (twilioWS) => {
   const flushPendingAudio = () => {
     while (pendingAudio.length && twilioWS.readyState === WebSocket.OPEN) {
       const frame = pendingAudio.shift();
-      try {
-        twilioWS.send(JSON.stringify(frame));
-      } catch (err) {
-        console.error("[Twilio flush error]", err);
-        break;
-      }
+      // reuse the same path that injects streamSid
+      safeSendTwilio(frame);
     }
   };
+
 
   // ---- OpenAI client socket ------------------------------------------------
   const openaiWS = new WebSocket(
@@ -76,8 +95,7 @@ wss.on("connection", (twilioWS) => {
       },
     }
   );
-
-  // --- ADD: safe sender + outbox for OpenAI
+  
   let openaiOutbox = [];
   const safeSendOpenAI = (objOrString) => {
     const data = typeof objOrString === "string" ? objOrString : JSON.stringify(objOrString);
@@ -87,15 +105,31 @@ wss.on("connection", (twilioWS) => {
       openaiOutbox.push(data);
     }
   };
+  
+  openaiWS.on("open", () => {
+    console.log("[OpenAI] WS open");
+    // Set session; output_audio_format must be a STRING (header also set)
+    safeSendOpenAI({
+      type: "session.update",
+      session: {
+        modalities: ["text", "audio"],
+        voice: "alloy",
+        output_audio_format: "g711_ulaw",
+      },
+    });
+    // Flush any queued messages
+    while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
+  });
 
   // Forward OpenAI audio -> Twilio (buffer until Twilio ready)
   openaiWS.on("message", (data) => {
     try {
       const msg = JSON.parse(data.toString());
-      if (msg.type === "response.audio.delta") {
+  
+      if (msg.type === "response.output_audio.delta" && msg.audio) {
         safeSendTwilio({
           event: "media",
-          media: { payload: msg.delta },
+          media: { payload: msg.audio },  // base64 g.711 μ-law
         });
       } else if (msg.type === "error") {
         console.error("[OpenAI ERROR]", msg);
@@ -110,20 +144,24 @@ wss.on("connection", (twilioWS) => {
     try {
       const msg = JSON.parse(raw.toString());
   
+      // AFTER
       if (msg.event === "start") {
         console.log("[Twilio] stream start:", msg.start.streamSid);
+        streamSid = msg.start.streamSid;   // NEW: save SID
         twilioReady = true;
         flushPendingAudio?.();
-  
-        // Ask OpenAI to speak immediately
-        openaiWS.send(JSON.stringify({
+      
+        // ask OpenAI to speak, but via safe sender (in case WS not OPEN yet)
+        safeSendOpenAI({
           type: "response.create",
           response: {
             instructions: "Hello from Barber AI. If you can hear this, the OpenAI link works.",
+            modalities: ["audio","text"], // optional but safe
           },
-        }));
+        });
         return;
       }
+
   
       // MEDIA HANDLING DISABLED (uncomment later for two-way)
       /*
@@ -150,18 +188,8 @@ wss.on("connection", (twilioWS) => {
     }
   });
 
- let commitTimer; // declare up top in the scope with twilioWS/openaiWS
-
-// ... inside openaiWS.on("open", ...) after your session.update + flush:
-commitTimer = setInterval(() => {
-  // use the guarded sender so we never call send while CONNECTING
-  safeSendOpenAI({ type: "input_audio_buffer.commit" });
-}, 250);
-
 // cleanup helper now handles an optional timer
-const cleanup = () => {
-  try { if (commitTimer) clearInterval(commitTimer); } catch {}
-};
+const cleanup = () => {};
 
   twilioWS.on("close", () => {
     console.log("[Twilio] closed");
