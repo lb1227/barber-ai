@@ -53,6 +53,8 @@ wss.on("connection", (twilioWS) => {
   // AFTER
   let twilioReady = false;
   let streamSid = null;                  // NEW: track stream SID
+  let inboundBytes = 0;           // count appended audio to know when to commit
+  let isSpeaking = false;         // for optional barge-in
   const pendingAudio = [];
   
   const safeSendTwilio = (msgObj) => {
@@ -112,8 +114,15 @@ wss.on("connection", (twilioWS) => {
       type: "session.update",
       session: {
         modalities: ["text", "audio"],
-        voice: "alloy",                // ✅ supported here
-        output_audio_format: "g711_ulaw",
+        voice: "alloy",
+        output_audio_format: "g711_ulaw",  // Twilio playback
+        input_audio_format: "g711_ulaw",   // Twilio inbound audio format
+        turn_detection: {                   // Server VAD
+          type: "server_vad",
+          threshold: 0.5,
+          silence_duration_ms: 500,
+          prefix_padding_ms: 200
+        },
         instructions:
           "You are Barber AI. Always speak concise US English for phone calls."
       },
@@ -137,9 +146,19 @@ wss.on("connection", (twilioWS) => {
         (msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") &&
         (msg.audio || msg.delta)
       ) {
+        isSpeaking = true; // TTS in progress
         const payload = msg.audio || msg.delta; // base64 G.711 μ-law
         safeSendTwilio({ event: "media", media: { payload } });
         safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
+      } else if (msg.type === "response.audio.done") {
+        isSpeaking = false; // TTS finished
+      } else if (msg.type === "response.done") {
+        // Immediately create the next response so the model will answer
+        // after the next user turn (server VAD will decide when to cut)
+        safeSendOpenAI({
+          type: "response.create",
+          response: { modalities: ["audio", "text"], conversation: "default" },
+        });
       } else if (msg.type === "error") {
         console.error("[OpenAI ERROR]", msg);
       }
@@ -157,6 +176,25 @@ wss.on("connection", (twilioWS) => {
         console.log("[Twilio] connected message:", msg.protocol, msg.version);
         return;
       }
+
+      if (msg.event === "media") {
+        // Optional barge-in: if AI is speaking and user talks, stop TTS
+        if (isSpeaking) {
+          safeSendOpenAI({ type: "response.cancel" });
+          isSpeaking = false;
+        }
+      
+        // Forward caller audio to OpenAI input buffer
+        const b64 = msg.media?.payload;
+        if (b64) {
+          inboundBytes += Buffer.byteLength(b64, "base64");
+          safeSendOpenAI({
+            type: "input_audio_buffer.append",
+            audio: b64, // base64 G.711 μ-law
+          });
+        }
+        return;
+      }
   
       if (msg.event === "start") {
         console.log("[Twilio] stream start:", msg.start.streamSid, "tracks:", msg.start.tracks);
@@ -164,13 +202,20 @@ wss.on("connection", (twilioWS) => {
         twilioReady = true;
         flushPendingAudio?.();
   
+        // Greeting
         safeSendOpenAI({
           type: "response.create",
           response: {
             instructions: "Say exactly: 'Hello from Barber AI. If you can hear this, the OpenAI link works.'",
             modalities: ["audio", "text"],
-            conversation: "none",                  // ← force a fresh turn
+            conversation: "none",
           },
+        });
+        
+        // Queue the next turn so it's ready to answer the caller right after
+        safeSendOpenAI({
+          type: "response.create",
+          response: { modalities: ["audio", "text"], conversation: "default" },
         });
         return;
       }
@@ -191,10 +236,23 @@ wss.on("connection", (twilioWS) => {
       console.error("Twilio message parse error", e);
     }
   });
+  
 
 
 // cleanup helper now handles an optional timer
-const cleanup = () => {};
+const BYTES_PER_100MS = 800; // μ-law: 8k samples/s * 1 byte * 0.1s
+const COMMIT_MS = 200;
+
+const commitTimer = setInterval(() => {
+  if (openaiWS.readyState === WebSocket.OPEN && inboundBytes >= BYTES_PER_100MS) {
+    safeSendOpenAI({ type: "input_audio_buffer.commit" });
+    inboundBytes = 0;
+  }
+}, COMMIT_MS);
+
+const cleanup = () => {
+  try { clearInterval(commitTimer); } catch {}
+};
 
   twilioWS.on("close", () => {
     console.log("[Twilio] closed");
