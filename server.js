@@ -77,22 +77,16 @@ wss.on("connection", (twilioWS) => {
     }
   );
 
-  openaiWS.on("open", () => {
-    console.log("[OpenAI] WS open");
-  
-    // Prime the session
-    openaiWS.send(
-      JSON.stringify({
-        type: "session.update",
-        session: {
-          modalities: ["text", "audio"],       // we want both text + audio
-          voice: "alloy",                      // voice to use
-          output_audio_format: { type: "g711_ulaw" }, // correct object form for Twilio
-          // ❌ no input_audio_format yet (we’re not streaming caller audio now)
-        },
-      })
-    );
-  });
+  // --- ADD: safe sender + outbox for OpenAI
+  let openaiOutbox = [];
+  const safeSendOpenAI = (objOrString) => {
+    const data = typeof objOrString === "string" ? objOrString : JSON.stringify(objOrString);
+    if (openaiWS.readyState === WebSocket.OPEN) {
+      try { openaiWS.send(data); } catch (e) { console.error("[OpenAI send error]", e); }
+    } else {
+      openaiOutbox.push(data);
+    }
+  };
 
   // Forward OpenAI audio -> Twilio (buffer until Twilio ready)
   openaiWS.on("message", (data) => {
