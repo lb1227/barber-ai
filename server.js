@@ -18,7 +18,7 @@ const server = http.createServer((req, res) => {
     const twiml = `
       <Response>
         <Connect>
-          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" track="inbound_track" />
+          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" track="both_tracks" />
         </Connect>
       </Response>
     `.trim();
