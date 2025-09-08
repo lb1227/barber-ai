@@ -52,6 +52,7 @@ wss.on("connection", (twilioWS) => {
   // ---- state/guards --------------------------------------------------------
   // AFTER
   let twilioReady = false;
+  let currentResponseId = null;   // track the active model response ID
   let streamSid = null;                  // NEW: track stream SID
   let isSpeaking = false;         // TTS in progress
   let awaitingCancel = false;     // we sent response.cancel, waiting to stop
@@ -157,18 +158,21 @@ wss.on("connection", (twilioWS) => {
     } else if (msg.type === "response.created") {
       // a response is now active
       activeResponse = true;
+      currentResponseId = msg.response?.id || null;
 
     } else if (msg.type === "response.audio.done") {
       // TTS finished
       isSpeaking = false;
       awaitingCancel = false;
       activeResponse = false;
+      currentResponseId = null;
 
     } else if (msg.type === "response.canceled") {
       // cancel confirmed
       isSpeaking = false;
       awaitingCancel = false;
       activeResponse = false;
+      currentResponseId = null;
 
     } else if (msg.type === "response.done") {
       // turn ended
@@ -176,10 +180,17 @@ wss.on("connection", (twilioWS) => {
       awaitingCancel = false;
       activeResponse = false;
       awaitingResponse = false;
+      currentResponseId = null;
 
-    } else if (msg.type === "input_audio_buffer.speech_started") {
-      // remember when speech began
-      vadSpeechStartMs = msg.audio_start_ms ?? Date.now();
+      } else if (msg.type === "input_audio_buffer.speech_started") {
+    vadSpeechStartMs = msg.audio_start_ms ?? Date.now();
+  
+    // Only cancel if the model is actually speaking AND we have an active response ID
+    if (activeResponse && isSpeaking && !awaitingCancel && currentResponseId) {
+      safeSendOpenAI({ type: "response.cancel", response_id: currentResponseId });
+      awaitingCancel = true;
+    }
+
 
     } else if (msg.type === "input_audio_buffer.speech_stopped") {
       // only reply to real utterances, not short blips
@@ -219,11 +230,6 @@ wss.on("connection", (twilioWS) => {
       const track = msg.media?.track || msg.track;
       if (track && track !== "inbound") return;
     
-      // Barge-in: stop TTS only if a response is actually active
-      if (activeResponse && isSpeaking && !awaitingCancel) {
-        safeSendOpenAI({ type: "response.cancel" });
-        awaitingCancel = true;
-      }
     
       const b64 = msg.media?.payload;
       if (b64) {
