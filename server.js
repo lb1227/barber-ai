@@ -17,9 +17,8 @@ const server = http.createServer((req, res) => {
   if (req.url === "/voice") {
     const twiml = `
       <Response>
-        <Say voice="alice">Connecting you to Barber A I.</Say>
         <Connect>
-          <Stream url="wss://…/media" track="both_tracks" />
+          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" track="inbound_track" />
         </Connect>
       </Response>
     `.trim();
@@ -57,13 +56,14 @@ wss.on("connection", (twilioWS) => {
   let isSpeaking = false;         // TTS in progress
   let awaitingCancel = false;     // we sent response.cancel, waiting to stop
   let awaitingResponse = false;   // we have already sent response.create for this
+  let appendedBytesThisTurn = 0;
   let activeResponse = false;      // true while a model response is active
   let vadSpeechStartMs = null;     // last speech start time from server VAD
   const pendingAudio = [];
   // --- barge-in helpers ---
   let mutedTTS = false;            // stop forwarding TTS audio to Twilio while caller is talking
   let bargeTimer = null;           // short timer to decide if we cancel TTS
-  const CANCEL_AFTER_MS = 75;     // if caller talks this long, cancel the active reply
+  const CANCEL_AFTER_MS = 200;     // if caller talks this long, cancel the active reply
   let lastCreateTs = 0;            // debounce guard for response.create
   const CREATE_DEBOUNCE_MS = 600;
  
@@ -173,6 +173,7 @@ wss.on("connection", (twilioWS) => {
         activeResponse = false;
         currentResponseId = null;
         mutedTTS = false;
+        if (bargeTimer) { clearTimeout(bargeTimer); bargeTimer = null; }
       
       } else if (msg.type === "response.canceled") {
         isSpeaking = false;
@@ -181,6 +182,7 @@ wss.on("connection", (twilioWS) => {
         awaitingResponse = false;
         currentResponseId = null;
         mutedTTS = false;
+        if (bargeTimer) { clearTimeout(bargeTimer); bargeTimer = null; }
       
       } else if (msg.type === "response.done") {
         isSpeaking = false;
@@ -189,10 +191,12 @@ wss.on("connection", (twilioWS) => {
         awaitingResponse = false;
         currentResponseId = null;
         mutedTTS = false;
+        if (bargeTimer) { clearTimeout(bargeTimer); bargeTimer = null; }
 
       } else if (msg.type === "input_audio_buffer.speech_started") {
   // caller started talking -> immediately mute TTS so they don’t hear overlap
   vadSpeechStartMs = msg.audio_start_ms ?? Date.now();
+      appendedBytesThisTurn = 0;
   mutedTTS = true;
 
   // If the model is speaking, arm a short timer; if caller keeps talking, cancel
@@ -206,35 +210,36 @@ wss.on("connection", (twilioWS) => {
     }, CANCEL_AFTER_MS);
   }
 
-} else if (msg.type === "input_audio_buffer.speech_stopped") {
-  if (bargeTimer) { clearTimeout(bargeTimer); bargeTimer = null; }
-
-  const durMs = (msg.audio_end_ms ?? 0) - (vadSpeechStartMs ?? 0);
-  vadSpeechStartMs = null;
-
-  // tiny/noisy blips: drop them and resume any ongoing TTS
-  if (durMs < 700) {
-    safeSendOpenAI({ type: "input_audio_buffer.clear" });
-    mutedTTS = false;
-    return;
-  }
-
-  // real utterance finished: if nothing is active, start a new reply (debounced)
-  const now = Date.now();
-  if (!activeResponse && !awaitingResponse && (now - lastCreateTs) >= CREATE_DEBOUNCE_MS) {
-    awaitingResponse = true;
-    lastCreateTs = now;
-    mutedTTS = false;
-    safeSendOpenAI({
-      type: "response.create",
-      response: { modalities: ["audio", "text"], conversation: "auto" },
-    });
-  } else {
-    // a response is still active (we didn’t cancel) -> resume TTS
-    mutedTTS = false;
-  }
-
-    } else if (msg.type === "error") {
+      } else if (msg.type === "input_audio_buffer.speech_stopped") {
+        if (bargeTimer) { clearTimeout(bargeTimer); bargeTimer = null; }
+      
+        const durMs = (msg.audio_end_ms ?? 0) - (vadSpeechStartMs ?? 0);
+        vadSpeechStartMs = null;
+      
+        // Drop quick/noisy blips: short duration OR too-few bytes
+        if (durMs < 700 || appendedBytesThisTurn < 2000) { // ~>= 250ms of μ-law audio
+          safeSendOpenAI({ type: "input_audio_buffer.clear" });
+          appendedBytesThisTurn = 0;
+          mutedTTS = false;
+          return;
+        }
+      
+        // Real utterance finished: create a reply only if nothing is active/pending (and debounced)
+        const now = Date.now();
+        if (!activeResponse && !awaitingResponse && (now - lastCreateTs) >= CREATE_DEBOUNCE_MS) {
+          awaitingResponse = true;
+          lastCreateTs = now;
+          mutedTTS = false;
+          appendedBytesThisTurn = 0;
+          safeSendOpenAI({
+            type: "response.create",
+            response: { modalities: ["audio", "text"], conversation: "auto" },
+          });
+        } else {
+          // A response is still active (we didn't cancel) -> resume TTS
+          mutedTTS = false;
+        }
+      }else if (msg.type === "error") {
       console.error("[OpenAI ERROR]", msg);
     }
   } catch (e) {
@@ -252,13 +257,28 @@ wss.on("connection", (twilioWS) => {
         const track = msg.media?.track || msg.track;
         if (track && track !== "inbound") return;
       
+        // ⬇️ Fast barge-in: as soon as we see caller audio while TTS is playing,
+        // mute TTS to the caller and arm the cancel timer.
+        if (isSpeaking && !mutedTTS) {
+          mutedTTS = true;
+          if (activeResponse && !awaitingCancel && currentResponseId && !bargeTimer) {
+            bargeTimer = setTimeout(() => {
+              if (mutedTTS && activeResponse && !awaitingCancel && currentResponseId) {
+                safeSendOpenAI({ type: "response.cancel", response_id: currentResponseId });
+                awaitingCancel = true;
+              }
+            }, CANCEL_AFTER_MS);  // 150–250ms is a good range
+          }
+        }
+      
         const b64 = msg.media?.payload;
         if (b64) {
-          // With server_vad we only append here; VAD drives commit/turn-taking
           safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
+          appendedBytesThisTurn += Buffer.from(b64, "base64").length; // keep your byte counter
         }
         return;
       }
+
 
       if (msg.event === "start") {
         console.log("[Twilio] stream start:", msg.start.streamSid, "tracks:", msg.start.tracks);
