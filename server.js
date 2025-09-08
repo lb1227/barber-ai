@@ -61,7 +61,9 @@ wss.on("connection", (twilioWS) => {
   let vadSpeechStartMs = null;     // last speech start time from server VAD
   const pendingAudio = [];
   // --- barge-in helpers ---
-  let mutedTTS = false;            // stop forwarding TTS audio to Twilio while caller is talking
+  let mutedTTS = false; // stop forwarding TTS audio to Twilio while caller is talking
+  const MIN_BARGE_MS = 120;
+  const MIN_BARGE_BYTES = 1600;
   let bargeTimer = null;           // short timer to decide if we cancel TTS
   const CANCEL_AFTER_MS = 200;     // if caller talks this long, cancel the active reply
   let lastCreateTs = 0;            // debounce guard for response.create
@@ -194,21 +196,20 @@ wss.on("connection", (twilioWS) => {
         if (bargeTimer) { clearTimeout(bargeTimer); bargeTimer = null; }
 
       } else if (msg.type === "input_audio_buffer.speech_started") {
-  // caller started talking -> immediately mute TTS so they don’t hear overlap
-  vadSpeechStartMs = msg.audio_start_ms ?? Date.now();
-      appendedBytesThisTurn = 0;
-  mutedTTS = true;
+          // caller started talking
+          vadSpeechStartMs = msg.audio_start_ms ?? Date.now();
+          appendedBytesThisTurn = 0;
+        
+          // Immediately mute TTS so the caller doesn’t hear overlap
+          mutedTTS = true;
+        
+          // If the model is speaking, cancel the current response now
+          if (isSpeaking && activeResponse && !awaitingCancel && currentResponseId) {
+            safeSendOpenAI({ type: "response.cancel", response_id: currentResponseId });
+            awaitingCancel = true;
+          }
+        }
 
-  // If the model is speaking, arm a short timer; if caller keeps talking, cancel
-  if (activeResponse && !awaitingCancel && currentResponseId) {
-    if (bargeTimer) clearTimeout(bargeTimer);
-    bargeTimer = setTimeout(() => {
-      if (mutedTTS && activeResponse && !awaitingCancel && currentResponseId) {
-        safeSendOpenAI({ type: "response.cancel", response_id: currentResponseId });
-        awaitingCancel = true;
-      }
-    }, CANCEL_AFTER_MS);
-  }
 
       } else if (msg.type === "input_audio_buffer.speech_stopped") {
         if (bargeTimer) { clearTimeout(bargeTimer); bargeTimer = null; }
@@ -254,16 +255,30 @@ wss.on("connection", (twilioWS) => {
       const msg = JSON.parse(raw.toString());
       
           if (msg.event === "media") {
-        const track = msg.media?.track || msg.track;
-        if (track && track !== "inbound") return;
-      
-        const b64 = msg.media?.payload;
-        if (b64) {
-          safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
-          appendedBytesThisTurn += Buffer.from(b64, "base64").length; // keep your byte counter
+          const track = msg.media?.track || msg.track;
+          if (track && track !== "inbound") return;
+        
+          const b64 = msg.media?.payload;
+          if (b64) {
+            // If bot is speaking and caller audio arrives, mute TTS immediately
+            if (isSpeaking && !mutedTTS) mutedTTS = true;
+        
+            // Append caller audio; VAD will handle turns
+            safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
+            appendedBytesThisTurn += Buffer.from(b64, "base64").length;
+        
+            // Backstop cancel: enough sustained caller audio -> cancel active reply
+            if (isSpeaking && activeResponse && !awaitingCancel && currentResponseId) {
+              const msSinceStart = Date.now() - (vadSpeechStartMs ?? Date.now());
+              if (msSinceStart >= MIN_BARGE_MS || appendedBytesThisTurn >= MIN_BARGE_BYTES) {
+                safeSendOpenAI({ type: "response.cancel", response_id: currentResponseId });
+                awaitingCancel = true;
+              }
+            }
+          }
+          return;
         }
-        return;
-      }
+
 
 
       if (msg.event === "start") {
