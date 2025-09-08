@@ -257,20 +257,6 @@ wss.on("connection", (twilioWS) => {
         const track = msg.media?.track || msg.track;
         if (track && track !== "inbound") return;
       
-        // ⬇️ Fast barge-in: as soon as we see caller audio while TTS is playing,
-        // mute TTS to the caller and arm the cancel timer.
-        if (isSpeaking && !mutedTTS) {
-          mutedTTS = true;
-          if (activeResponse && !awaitingCancel && currentResponseId && !bargeTimer) {
-            bargeTimer = setTimeout(() => {
-              if (mutedTTS && activeResponse && !awaitingCancel && currentResponseId) {
-                safeSendOpenAI({ type: "response.cancel", response_id: currentResponseId });
-                awaitingCancel = true;
-              }
-            }, CANCEL_AFTER_MS);  // 150–250ms is a good range
-          }
-        }
-      
         const b64 = msg.media?.payload;
         if (b64) {
           safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
