@@ -15,11 +15,10 @@ const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
 
 const server = http.createServer((req, res) => {
   if (req.url === "/voice") {
-    console.log("[HTTP] /voice hit"); // <— ADDED: verify Twilio is using this route
     const twiml = `
       <Response>
         <Connect>
-          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" track="both_tracks" />
+          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" track="inbound_track" />
         </Connect>
       </Response>
     `.trim();
@@ -102,7 +101,8 @@ wss.on("connection", (twilioWS) => {
     const buf = Buffer.from(base64Audio, "base64");
     for (let i = 0; i < buf.length; i += 160) { // 160 bytes ≈ 20ms @ 8k μ-law
       const chunk = buf.subarray(i, i + 160).toString("base64");
-      safeSendTwilio({ event: "media", track: "outbound", media: { payload: chunk } });
+      // CHANGED: removed track: "outbound"
+      safeSendTwilio({ event: "media", media: { payload: chunk } });
     }
     if (streamSid) safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
   }
@@ -171,7 +171,7 @@ wss.on("connection", (twilioWS) => {
         isSpeaking = true;
         if (!mutedTTS) {                            // <— only play TTS if we’re not barge-muted
           const payload = msg.audio || msg.delta;
-          // CHANGED: chunk + outbound track
+          // CHANGED: chunk + (no track field)
           sendToTwilioOut(payload);
         }
 
