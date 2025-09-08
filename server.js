@@ -63,7 +63,7 @@ wss.on("connection", (twilioWS) => {
   // --- barge-in helpers ---
   let mutedTTS = false;            // stop forwarding TTS audio to Twilio while caller is talking
   let bargeTimer = null;           // short timer to decide if we cancel TTS
-  const CANCEL_AFTER_MS = 250;     // if caller talks this long, cancel the active reply
+  const CANCEL_AFTER_MS = 75;     // if caller talks this long, cancel the active reply
   let lastCreateTs = 0;            // debounce guard for response.create
   const CREATE_DEBOUNCE_MS = 600;
  
@@ -129,9 +129,9 @@ wss.on("connection", (twilioWS) => {
         input_audio_format: "g711_ulaw",   // Twilio inbound audio format
         turn_detection: {                   // Server VAD
           type: "server_vad",
-          threshold: 0.5,
-          silence_duration_ms: 500,
-          prefix_padding_ms: 200
+          threshold: 0.35,
+          silence_duration_ms: 350,
+          prefix_padding_ms: 150
         },
         instructions:
           "You are Barber AI. Always speak concise US English for phone calls."
@@ -189,35 +189,6 @@ wss.on("connection", (twilioWS) => {
         awaitingResponse = false;
         currentResponseId = null;
         mutedTTS = false;
-
-      } else if (msg.type === "input_audio_buffer.speech_started") {
-    vadSpeechStartMs = msg.audio_start_ms ?? Date.now();
-  
-    // Only cancel if the model is actually speaking AND we have an active response ID
-    if (activeResponse && isSpeaking && !awaitingCancel && currentResponseId) {
-      safeSendOpenAI({ type: "response.cancel", response_id: currentResponseId });
-      awaitingCancel = true;
-    }
-
-
-    } else if (msg.type === "input_audio_buffer.speech_stopped") {
-      // only reply to real utterances, not short blips
-      const durMs = (msg.audio_end_ms ?? 0) - (vadSpeechStartMs ?? 0);
-      vadSpeechStartMs = null;
-
-      if (durMs < 700) {
-        // ignore quick/noisy bursts
-        safeSendOpenAI({ type: "input_audio_buffer.clear" });
-        return;
-      }
-    
-          if (!awaitingResponse && !activeResponse) {
-      safeSendOpenAI({
-        type: "response.create",
-        response: { modalities: ["audio", "text"], conversation: "auto" },
-      });
-      awaitingResponse = true;
-    }
 
       } else if (msg.type === "input_audio_buffer.speech_started") {
   // caller started talking -> immediately mute TTS so they don’t hear overlap
