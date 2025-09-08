@@ -19,7 +19,7 @@ const server = http.createServer((req, res) => {
       <Response>
         <Say voice="alice">Connecting you to Barber A I.</Say>
         <Connect>
-          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" track="inbound_track" />
+          <Stream url="wss://…/media" track="both_tracks" />
         </Connect>
       </Response>
     `.trim();
@@ -56,6 +56,8 @@ wss.on("connection", (twilioWS) => {
   let isSpeaking = false;         // TTS in progress
   let awaitingCancel = false;     // we sent response.cancel, waiting to stop
   let awaitingResponse = false;   // we have already sent response.create for this
+  let activeResponse = false;      // true while a model response is active
+  let vadSpeechStartMs = null;     // last speech start time from server VAD
   const pendingAudio = [];
   
   const safeSendTwilio = (msgObj) => {
@@ -146,31 +148,50 @@ wss.on("connection", (twilioWS) => {
       (msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") &&
       (msg.audio || msg.delta)
     ) {
-      isSpeaking = true; // TTS in progress
+      // model is speaking
+      isSpeaking = true;
       const payload = msg.audio || msg.delta; // base64 G.711 μ-law
       safeSendTwilio({ event: "media", media: { payload } });
-      if (streamSid) {
-        safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
-      }
+      if (streamSid) safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
+
+    } else if (msg.type === "response.created") {
+      // a response is now active
+      activeResponse = true;
 
     } else if (msg.type === "response.audio.done") {
-      // TTS finished streaming
+      // TTS finished
       isSpeaking = false;
       awaitingCancel = false;
+      activeResponse = false;
 
     } else if (msg.type === "response.canceled") {
-      // Server confirms the response was canceled
+      // cancel confirmed
       isSpeaking = false;
       awaitingCancel = false;
+      activeResponse = false;
 
     } else if (msg.type === "response.done") {
-      // A full assistant turn finished
+      // turn ended
       isSpeaking = false;
       awaitingCancel = false;
+      activeResponse = false;
       awaitingResponse = false;
 
+    } else if (msg.type === "input_audio_buffer.speech_started") {
+      // remember when speech began
+      vadSpeechStartMs = msg.audio_start_ms ?? Date.now();
+
     } else if (msg.type === "input_audio_buffer.speech_stopped") {
-      // Let server VAD drive turns: only respond after user stops speaking
+      // only reply to real utterances, not short blips
+      const durMs = (msg.audio_end_ms ?? 0) - (vadSpeechStartMs ?? 0);
+      vadSpeechStartMs = null;
+
+      if (durMs < 700) {
+        // ignore quick/noisy bursts
+        safeSendOpenAI({ type: "input_audio_buffer.clear" });
+        return;
+      }
+
       if (!awaitingResponse) {
         safeSendOpenAI({
           type: "response.create",
@@ -182,7 +203,6 @@ wss.on("connection", (twilioWS) => {
     } else if (msg.type === "error") {
       console.error("[OpenAI ERROR]", msg);
     }
-
   } catch (e) {
     console.error("OpenAI message parse error", e);
   }
@@ -190,28 +210,28 @@ wss.on("connection", (twilioWS) => {
 
 
   // ---- Twilio inbound ------------------------------------------------------
-  twilioWS.on("message", (raw) => {
-    try {
-      const msg = JSON.parse(raw.toString());
-  
-            if (msg.event === "media") {
-        // Ignore anything except the inbound track to prevent feedback/self-talk
-        const track = msg.media?.track || msg.track;
-        if (track && track !== "inbound") return;
+      twilioWS.on("message", (raw) => {
+        try {
+          const msg = JSON.parse(raw.toString());
       
-        // Barge-in: stop TTS when caller speaks
-        if (isSpeaking && !awaitingCancel) {
-          safeSendOpenAI({ type: "response.cancel" });
-          awaitingCancel = true; // wait for response.canceled / audio.done
-        }
-      
-        const b64 = msg.media?.payload;
-        if (b64) {
-          // Append caller audio; DO NOT commit manually when using server_vad
-          safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
-        }
-        return;
+                if (msg.event === "media") {
+      // Ignore anything except the inbound track to prevent feedback/self-talk
+      const track = msg.media?.track || msg.track;
+      if (track && track !== "inbound") return;
+    
+      // Barge-in: stop TTS only if a response is actually active
+      if (activeResponse && isSpeaking && !awaitingCancel) {
+        safeSendOpenAI({ type: "response.cancel" });
+        awaitingCancel = true;
       }
+    
+      const b64 = msg.media?.payload;
+      if (b64) {
+        // Append caller audio; DO NOT commit manually when using server_vad
+        safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
+      }
+      return;
+    }
   
       if (msg.event === "start") {
         console.log("[Twilio] stream start:", msg.start.streamSid, "tracks:", msg.start.tracks);
