@@ -172,6 +172,7 @@ wss.on("connection", (twilioWS) => {
       isSpeaking = false;
       awaitingCancel = false;
       activeResponse = false;
+      awaitingResponse = false;
       currentResponseId = null;
 
     } else if (msg.type === "response.done") {
@@ -202,14 +203,15 @@ wss.on("connection", (twilioWS) => {
         safeSendOpenAI({ type: "input_audio_buffer.clear" });
         return;
       }
+    
+          if (!awaitingResponse && !activeResponse) {
+      safeSendOpenAI({
+        type: "response.create",
+        response: { modalities: ["audio", "text"], conversation: "auto" },
+      });
+      awaitingResponse = true;
+    }
 
-      if (!awaitingResponse) {
-        safeSendOpenAI({
-          type: "response.create",
-          response: { modalities: ["audio", "text"], conversation: "auto" },
-        });
-        awaitingResponse = true;
-      }
 
     } else if (msg.type === "error") {
       console.error("[OpenAI ERROR]", msg);
@@ -245,9 +247,19 @@ wss.on("connection", (twilioWS) => {
         twilioReady = true;
         flushPendingAudio?.();
   
-        // Greeting
+                // Greeting
         safeSendOpenAI({
           type: "response.create",
+          response: {
+            instructions: "Say exactly: 'Hello from Barber AI. If you can hear this, the OpenAI link works.'",
+            modalities: ["audio", "text"],
+            conversation: "none",
+          },
+        });
+        awaitingResponse = true;   // prevent VAD from creating a second response during greeting
+        return;
+        
+
           response: {
             instructions: "Say exactly: 'Hello from Barber AI. If you can hear this, the OpenAI link works.'",
             modalities: ["audio", "text"],
