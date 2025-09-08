@@ -95,6 +95,16 @@ wss.on("connection", (twilioWS) => {
     }
   };
 
+  // --- helper to send assistant audio to Twilio on OUTBOUND track in ~20ms frames
+  function sendToTwilioOut(base64Audio) {
+    if (!base64Audio) return;
+    const buf = Buffer.from(base64Audio, "base64");
+    for (let i = 0; i < buf.length; i += 160) { // 160 bytes ≈ 20ms @ 8k μ-law
+      const chunk = buf.subarray(i, i + 160).toString("base64");
+      safeSendTwilio({ event: "media", track: "outbound", media: { payload: chunk } });
+    }
+    if (streamSid) safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
+  }
 
   // ---- OpenAI client socket ------------------------------------------------
   const openaiWS = new WebSocket(
@@ -160,8 +170,8 @@ wss.on("connection", (twilioWS) => {
         isSpeaking = true;
         if (!mutedTTS) {                            // <— only play TTS if we’re not barge-muted
           const payload = msg.audio || msg.delta;
-          safeSendTwilio({ event: "media", media: { payload } });
-          if (streamSid) safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
+          // CHANGED: chunk + outbound track
+          sendToTwilioOut(payload);
         }
 
       } else if (msg.type === "response.created") {
