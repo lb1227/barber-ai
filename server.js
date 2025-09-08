@@ -15,6 +15,7 @@ const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
 
 const server = http.createServer((req, res) => {
   if (req.url === "/voice") {
+    console.log("[HTTP] /voice hit"); // <— ADDED: verify Twilio is using this route
     const twiml = `
       <Response>
         <Connect>
