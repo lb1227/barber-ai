@@ -120,7 +120,7 @@ wss.on("connection", (twilioWS) => {
         modalities: ["text", "audio"],
         voice: "alloy",
         output_audio_format: "g711_ulaw",     // Twilio playback
-        input_audio_format: { type: "g711_ulaw" }, // Twilio inbound audio format
+        input_audio_format: "g711_ulaw",      // <-- string (fixes invalid_type)
         turn_detection: {                     // Server VAD
           type: "server_vad",
           threshold: 0.5,
@@ -189,7 +189,7 @@ wss.on("connection", (twilioWS) => {
     try {
       const msg = JSON.parse(raw.toString());
 
-      // === NEW: commit after ~100ms (5 frames) & no manual cancel ===
+      // === commit after ~100ms (5 frames); no timer, no manual cancel ===
       if (msg.event === "media") {
         const b64 = msg.media?.payload;
         if (b64) {
@@ -214,7 +214,7 @@ wss.on("connection", (twilioWS) => {
         }
         return;
       }
-      // === END NEW ===
+      // === END ===
   
       if (msg.event === "start") {
         console.log("[Twilio] stream start:", msg.start.streamSid, "tracks:", msg.start.tracks);
