@@ -223,53 +223,53 @@ wss.on("connection", (twilioWS) => {
 
 
   // ---- Twilio inbound ------------------------------------------------------
-      twilioWS.on("message", (raw) => {
-        try {
-          const msg = JSON.parse(raw.toString());
+  twilioWS.on("message", (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
       
-          if (msg.event === "media") {
-            // Ignore anything except the inbound track to prevent feedback/self-talk
-            const track = msg.media?.track || msg.track;
-            if (track && track !== "inbound") return;
+      if (msg.event === "media") {
+        // Ignore anything except the inbound track to prevent feedback/self-talk
+        const track = msg.media?.track || msg.track;
+        if (track && track !== "inbound") return;
           
           
-            const b64 = msg.media?.payload;
-            if (b64) {
-              // Append caller audio; DO NOT commit manually when using server_vad
-              safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
-            }
-            return;
-          }
-          if (msg.event === "start") {
-            console.log("[Twilio] stream start:", msg.start.streamSid, "tracks:", msg.start.tracks);
-            streamSid = msg.start.streamSid;
-            twilioReady = true;
-            flushPendingAudio?.();
+        const b64 = msg.media?.payload;
+        if (b64) {
+          // Append caller audio; DO NOT commit manually when using server_vad
+          safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
+        }
+        return;
+      }
+      if (msg.event === "start") {
+        console.log("[Twilio] stream start:", msg.start.streamSid, "tracks:", msg.start.tracks);
+        streamSid = msg.start.streamSid;
+        twilioReady = true;
+        flushPendingAudio?.();
           
-            // Greeting
-            safeSendOpenAI({
-              type: "response.create",
-              response: {
-                instructions: "Say exactly: 'Hello from Barber AI. If you can hear this, the OpenAI link works.'",
-                modalities: ["audio", "text"],
-                conversation: "none",
-              },
-            });
-            awaitingResponse = true;  // must be OUTSIDE the object above
-            return;
-          }     
+        // Greeting
+        safeSendOpenAI({
+          type: "response.create",
+          response: {
+            instructions: "Say exactly: 'Hello from Barber AI. If you can hear this, the OpenAI link works.'",
+            modalities: ["audio", "text"],
+            conversation: "none",
+          },
+        });
+        awaitingResponse = true;  // must be OUTSIDE the object above
+        return;
+      }     
   
-        if (msg.event === "mark") {
-          console.log("[Twilio] mark received:", msg?.mark?.name);
-          return;
-        }
+    if (msg.event === "mark") {
+      console.log("[Twilio] mark received:", msg?.mark?.name);
+      return;
+    }
     
-        if (msg.event === "stop") {
-          console.log("[Twilio] stop");
-          safeClose(openaiWS);
-          safeClose(twilioWS);
-          return;
-        }
+    if (msg.event === "stop") {
+      console.log("[Twilio] stop");
+      safeClose(openaiWS);
+      safeClose(twilioWS);
+      return;
+    }
   
     } catch (e) {
       console.error("Twilio message parse error", e);
