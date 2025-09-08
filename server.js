@@ -19,7 +19,7 @@ const server = http.createServer((req, res) => {
       <Response>
         <Say voice="alice">Connecting you to Barber A I.</Say>
         <Connect>
-          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" track="both" />
+          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" track="inbound_track" />
         </Connect>
       </Response>
     `.trim();
@@ -53,8 +53,6 @@ wss.on("connection", (twilioWS) => {
   // AFTER
   let twilioReady = false;
   let streamSid = null;                  // NEW: track stream SID
-  let inboundBytes = 0;           // decoded μ-law bytes appended
-  let hasInboundAudio = false;    // start committing only after we see audio
   let isSpeaking = false;         // TTS in progress
   let awaitingCancel = false;     // we sent response.cancel, waiting to stop
   let awaitingResponse = false;   // we have already sent response.create for this
@@ -138,49 +136,57 @@ wss.on("connection", (twilioWS) => {
 
   // Forward OpenAI audio -> Twilio (buffer until Twilio ready)
   openaiWS.on("message", (data) => {
-    try {
-      const msg = JSON.parse(data.toString());
-      if (!["response.output_audio.delta", "error"].includes(msg.type)) {
-        console.log("[OpenAI EVENT]", msg.type, JSON.stringify(msg).slice(0, 400));
-      }
-  
-      if (
-        (msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") &&
-        (msg.audio || msg.delta)
-      ) {
-        isSpeaking = true; // TTS in progress
-        const payload = msg.audio || msg.delta; // base64 G.711 μ-law
-        safeSendTwilio({ event: "media", media: { payload } });
-        if (streamSid) {
-          safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
-        }
-      
-      } else if (msg.type === "response.audio.done") {
-        // TTS finished streaming
-        isSpeaking = false;
-        awaitingCancel = false;
-      
-      } else if (msg.type === "response.canceled") {
-        // Server confirms the response was canceled
-        isSpeaking = false;
-        awaitingCancel = false;
-        // leave awaitingResponse as-is; we'll clear it on response.done
-      
-      } else if (msg.type === "response.done") {
-        // A full assistant turn finished
-        isSpeaking = false;
-        awaitingCancel = false;
-        awaitingResponse = false; // allow the next turn to be queued from the commit timer
-      
-      } else if (msg.type === "error") {
-        console.error("[OpenAI ERROR]", msg);
-      }
-
-    } catch (e) {
-      console.error("OpenAI message parse error", e);
+  try {
+    const msg = JSON.parse(data.toString());
+    if (!["response.output_audio.delta", "error"].includes(msg.type)) {
+      console.log("[OpenAI EVENT]", msg.type, JSON.stringify(msg).slice(0, 400));
     }
-  });
 
+    if (
+      (msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") &&
+      (msg.audio || msg.delta)
+    ) {
+      isSpeaking = true; // TTS in progress
+      const payload = msg.audio || msg.delta; // base64 G.711 μ-law
+      safeSendTwilio({ event: "media", media: { payload } });
+      if (streamSid) {
+        safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
+      }
+
+    } else if (msg.type === "response.audio.done") {
+      // TTS finished streaming
+      isSpeaking = false;
+      awaitingCancel = false;
+
+    } else if (msg.type === "response.canceled") {
+      // Server confirms the response was canceled
+      isSpeaking = false;
+      awaitingCancel = false;
+
+    } else if (msg.type === "response.done") {
+      // A full assistant turn finished
+      isSpeaking = false;
+      awaitingCancel = false;
+      awaitingResponse = false;
+
+    } else if (msg.type === "input_audio_buffer.speech_stopped") {
+      // Let server VAD drive turns: only respond after user stops speaking
+      if (!awaitingResponse) {
+        safeSendOpenAI({
+          type: "response.create",
+          response: { modalities: ["audio", "text"], conversation: "auto" },
+        });
+        awaitingResponse = true;
+      }
+
+    } else if (msg.type === "error") {
+      console.error("[OpenAI ERROR]", msg);
+    }
+
+  } catch (e) {
+    console.error("OpenAI message parse error", e);
+  }
+});
 
 
   // ---- Twilio inbound ------------------------------------------------------
@@ -188,8 +194,12 @@ wss.on("connection", (twilioWS) => {
     try {
       const msg = JSON.parse(raw.toString());
   
-      if (msg.event === "media") {
-        // Barge-in only if TTS is actually in progress and we didn't already cancel
+            if (msg.event === "media") {
+        // Ignore anything except the inbound track to prevent feedback/self-talk
+        const track = msg.media?.track || msg.track;
+        if (track && track !== "inbound") return;
+      
+        // Barge-in: stop TTS when caller speaks
         if (isSpeaking && !awaitingCancel) {
           safeSendOpenAI({ type: "response.cancel" });
           awaitingCancel = true; // wait for response.canceled / audio.done
@@ -197,21 +207,11 @@ wss.on("connection", (twilioWS) => {
       
         const b64 = msg.media?.payload;
         if (b64) {
-          hasInboundAudio = true;
-          const decodedLen = Buffer.from(b64, "base64").length;
-          inboundBytes += decodedLen;
-      
-          // Append caller audio
+          // Append caller audio; DO NOT commit manually when using server_vad
           safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
-          pendingCommit = true; // <- we appended fresh audio, so a commit is warranted
-          startCommitTimerIfNeeded();
-
         }
         return;
       }
-
-
-
   
       if (msg.event === "start") {
         console.log("[Twilio] stream start:", msg.start.streamSid, "tracks:", msg.start.tracks);
@@ -248,55 +248,13 @@ wss.on("connection", (twilioWS) => {
     }
   });
   
-
-
-  // cleanup helper now handles an optional timer
-  // commit timer controls
-  const COMMIT_THRESHOLD = 2000;  // ~= 200–250ms of μ-law (tune 1600–2400)
-  const COMMIT_MS = 150;
-  let commitTimer = null;
-  let pendingCommit = false; // set true on every append
-  
-  function startCommitTimerIfNeeded() {
-    if (commitTimer) return;
-    commitTimer = setInterval(() => {
-      if (!hasInboundAudio) return;
-      if (openaiWS.readyState !== WebSocket.OPEN) return;
-  
-      // Only commit if we appended since last commit, have enough audio,
-      // and we're not already waiting for a model response
-      if (pendingCommit && inboundBytes >= COMMIT_THRESHOLD && !awaitingResponse) {
-        console.log("[Commit] sending with", inboundBytes, "bytes");
-        safeSendOpenAI({ type: "input_audio_buffer.commit" });
-  
-        // Immediately request model response for THIS turn
-        safeSendOpenAI({
-          type: "response.create",
-          response: { modalities: ["audio", "text"], conversation: "auto" },
-        });
-        awaitingResponse = true;
-  
-        inboundBytes = 0;
-        pendingCommit = false;
-      }
-    }, COMMIT_MS);
-  }
-  
-  function stopCommitTimer() {
-    if (commitTimer) {
-      clearInterval(commitTimer);
-      commitTimer = null;
-    }
-  }
   
   twilioWS.on("close", () => {
     console.log("[Twilio] closed");
-    stopCommitTimer();
     safeClose(openaiWS);
   });
   openaiWS.on("close", () => {
     console.log("[OpenAI] closed");
-    stopCommitTimer();
     safeClose(twilioWS);
   });
 
