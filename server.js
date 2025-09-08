@@ -241,13 +241,13 @@ wss.on("connection", (twilioWS) => {
       return;
     }
   
-      if (msg.event === "start") {
+           if (msg.event === "start") {
         console.log("[Twilio] stream start:", msg.start.streamSid, "tracks:", msg.start.tracks);
         streamSid = msg.start.streamSid;
         twilioReady = true;
         flushPendingAudio?.();
-  
-                // Greeting
+      
+        // Greeting
         safeSendOpenAI({
           type: "response.create",
           response: {
@@ -256,9 +256,9 @@ wss.on("connection", (twilioWS) => {
             conversation: "none",
           },
         });
-        awaitingResponse = true;   // prevent VAD from creating a second response during greeting
+        awaitingResponse = true; // prevent a second response while greeting is in flight
         return;
-        
+      }       
 
           response: {
             instructions: "Say exactly: 'Hello from Barber AI. If you can hear this, the OpenAI link works.'",
