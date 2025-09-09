@@ -36,7 +36,7 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ noServer: true });
 
 server.on("upgrade", (req, socket, head) => {
-  console.log("WS upgrade attempt:", req.url); // <-- added debug log
+  console.log("WS upgrade attempt:", req.url); // debug
   if (req.url === "/media") {
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit("connection", ws, req);
@@ -50,22 +50,20 @@ wss.on("connection", (twilioWS) => {
   console.log("[Twilio] connected");
 
   // ---- state/guards --------------------------------------------------------
-  // AFTER
   let twilioReady = false;
   let currentResponseId = null;   // track the active model response ID
-  let streamSid = null;                  // NEW: track stream SID
+  let streamSid = null;           // track stream SID
   let isSpeaking = false;         // TTS in progress
   let awaitingCancel = false;     // we sent response.cancel, waiting to stop
   let awaitingResponse = false;   // we have already sent response.create for this
-  let activeResponse = false;      // true while a model response is active
-  let vadSpeechStartMs = null;     // last speech start time from server VAD
+  let activeResponse = false;     // true while a model response is active
+  let vadSpeechStartMs = null;    // last speech start time from server VAD
   const pendingAudio = [];
   // --- barge-in helpers ---
-  let mutedTTS = false;            // stop forwarding TTS audio to Twilio while caller is talking
-  let bargeTimer = null;           // short timer to decide if we cancel TTS
-  const CANCEL_AFTER_MS = 250;     // if caller talks this long, cancel the active reply
-  const CANCEL_AFTER_MS = 75;      // if caller talks this long, cancel the active reply
-  let lastCreateTs = 0;            // debounce guard for response.create
+  let mutedTTS = false;           // stop forwarding TTS audio to Twilio while caller is talking
+  let bargeTimer = null;          // short timer to decide if we cancel TTS
+  const CANCEL_AFTER_MS = 75;     // if caller talks this long, cancel the active reply
+  let lastCreateTs = 0;           // debounce guard for response.create
   const CREATE_DEBOUNCE_MS = 600;
 
   const safeSendTwilio = (msgObj) => {
@@ -149,24 +147,24 @@ wss.on("connection", (twilioWS) => {
 
   // Forward OpenAI audio -> Twilio (buffer until Twilio ready)
   openaiWS.on("message", (data) => {
-  try {
-    const msg = JSON.parse(data.toString());
-    if (!["response.output_audio.delta", "error"].includes(msg.type)) {
-      console.log("[OpenAI EVENT]", msg.type, JSON.stringify(msg).slice(0, 400));
-    }
-
-    if (
-      (msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") &&
-      (msg.audio || msg.delta)
-    ) {
-      isSpeaking = true;
-      if (!mutedTTS) {                            // <— only play TTS if we’re not barge-muted
-        const payload = msg.audio || msg.delta;
-        safeSendTwilio({ event: "media", media: { payload } });
-        if (streamSid) safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
+    try {
+      const msg = JSON.parse(data.toString());
+      if (!["response.output_audio.delta", "error"].includes(msg.type)) {
+        console.log("[OpenAI EVENT]", msg.type, JSON.stringify(msg).slice(0, 400));
       }
 
-          } else if (msg.type === "response.created") {
+      if (
+        (msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") &&
+        (msg.audio || msg.delta)
+      ) {
+        isSpeaking = true;
+        if (!mutedTTS) {                            // only play TTS if we’re not barge-muted
+          const payload = msg.audio || msg.delta;
+          safeSendTwilio({ event: "media", media: { payload } });
+          if (streamSid) safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
+        }
+
+      } else if (msg.type === "response.created") {
         activeResponse = true;
         awaitingResponse = false;
         currentResponseId = msg.response?.id || currentResponseId;
@@ -195,85 +193,40 @@ wss.on("connection", (twilioWS) => {
         mutedTTS = false;
 
       } else if (msg.type === "input_audio_buffer.speech_started") {
-    vadSpeechStartMs = msg.audio_start_ms ?? Date.now();
-  
-    // Only cancel if the model is actually speaking AND we have an active response ID
-    if (activeResponse && isSpeaking && !awaitingCancel && currentResponseId) {
-      safeSendOpenAI({ type: "response.cancel", response_id: currentResponseId });
-      awaitingCancel = true;
-    }
+        vadSpeechStartMs = msg.audio_start_ms ?? Date.now();
 
+        // Only cancel if the model is actually speaking AND we have an active response ID
+        if (activeResponse && isSpeaking && !awaitingCancel && currentResponseId) {
+          safeSendOpenAI({ type: "response.cancel", response_id: currentResponseId });
+          awaitingCancel = true;
+        }
 
-    } else if (msg.type === "input_audio_buffer.speech_stopped") {
-      // only reply to real utterances, not short blips
-      const durMs = (msg.audio_end_ms ?? 0) - (vadSpeechStartMs ?? 0);
-      vadSpeechStartMs = null;
+      } else if (msg.type === "input_audio_buffer.speech_stopped") {
+        // only reply to real utterances, not short blips
+        const durMs = (msg.audio_end_ms ?? 0) - (vadSpeechStartMs ?? 0);
+        vadSpeechStartMs = null;
 
-      if (durMs < 700) {
-        // ignore quick/noisy bursts
-        safeSendOpenAI({ type: "input_audio_buffer.clear" });
-        return;
+        if (durMs < 700) {
+          // ignore quick/noisy bursts
+          safeSendOpenAI({ type: "input_audio_buffer.clear" });
+          return;
+        }
+
+        if (!awaitingResponse && !activeResponse) {
+          safeSendOpenAI({
+            type: "response.create",
+            response: { modalities: ["audio", "text"], conversation: "auto" },
+          });
+          awaitingResponse = true;
+        }
+
+      } else if (msg.type === "error") {
+        console.error("[OpenAI ERROR]", msg);
       }
-    
-          if (!awaitingResponse && !activeResponse) {
-      safeSendOpenAI({
-        type: "response.create",
-        response: { modalities: ["audio", "text"], conversation: "auto" },
-      });
-      awaitingResponse = true;
+    } catch (e) {
+      console.error("OpenAI message parse error", e);
     }
-
-      } else if (msg.type === "input_audio_buffer.speech_started") {
-  // caller started talking -> immediately mute TTS so they don’t hear overlap
-  vadSpeechStartMs = msg.audio_start_ms ?? Date.now();
-  mutedTTS = true;
-
-  // If the model is speaking, arm a short timer; if caller keeps talking, cancel
-  if (activeResponse && !awaitingCancel && currentResponseId) {
-    if (bargeTimer) clearTimeout(bargeTimer);
-    bargeTimer = setTimeout(() => {
-      if (mutedTTS && activeResponse && !awaitingCancel && currentResponseId) {
-        safeSendOpenAI({ type: "response.cancel", response_id: currentResponseId });
-        awaitingCancel = true;
-      }
-    }, CANCEL_AFTER_MS);
-  }
-
-} else if (msg.type === "input_audio_buffer.speech_stopped") {
-  if (bargeTimer) { clearTimeout(bargeTimer); bargeTimer = null; }
-
-  const durMs = (msg.audio_end_ms ?? 0) - (vadSpeechStartMs ?? 0);
-  vadSpeechStartMs = null;
-
-  // tiny/noisy blips: drop them and resume any ongoing TTS
-  if (durMs < 700) {
-    safeSendOpenAI({ type: "input_audio_buffer.clear" });
-    mutedTTS = false;
-    return;
-  }
-
-  // real utterance finished: if nothing is active, start a new reply (debounced)
-  const now = Date.now();
-  if (!activeResponse && !awaitingResponse && (now - lastCreateTs) >= CREATE_DEBOUNCE_MS) {
-    awaitingResponse = true;
-    lastCreateTs = now;
-    mutedTTS = false;
-    safeSendOpenAI({
-      type: "response.create",
-      response: { modalities: ["audio", "text"], conversation: "auto" },
-    });
-  } else {
-    // a response is still active (we didn’t cancel) -> resume TTS
-    mutedTTS = false;
-  }
-
-    } else if (msg.type === "error") {
-      console.error("[OpenAI ERROR]", msg);
-    }
-  } catch (e) {
-    console.error("OpenAI message parse error", e);
-  }
-});
+  });
 
 
   // ---- Twilio inbound ------------------------------------------------------
@@ -281,7 +234,7 @@ wss.on("connection", (twilioWS) => {
     try {
       const msg = JSON.parse(raw.toString());
 
-          if (msg.event === "media") {
+      if (msg.event === "media") {
         const track = msg.media?.track || msg.track;
         if (track && track !== "inbound") return;
 
@@ -310,25 +263,24 @@ wss.on("connection", (twilioWS) => {
         });
         awaitingResponse = true;  // must be OUTSIDE the object above
         return;
-      }     
+      }
 
-    if (msg.event === "mark") {
-      console.log("[Twilio] mark received:", msg?.mark?.name);
-      return;
-    }
+      if (msg.event === "mark") {
+        console.log("[Twilio] mark received:", msg?.mark?.name);
+        return;
+      }
 
-    if (msg.event === "stop") {
-      console.log("[Twilio] stop");
-      safeClose(openaiWS);
-      safeClose(twilioWS);
-      return;
-    }
+      if (msg.event === "stop") {
+        console.log("[Twilio] stop");
+        safeClose(openaiWS);
+        safeClose(twilioWS);
+        return;
+      }
 
     } catch (e) {
       console.error("Twilio message parse error", e);
     }
   });
-
 
   twilioWS.on("close", () => {
     console.log("[Twilio] closed");
@@ -338,8 +290,6 @@ wss.on("connection", (twilioWS) => {
     console.log("[OpenAI] closed");
     safeClose(twilioWS);
   });
-
-
 
   twilioWS.on("error", (e) => console.error("[Twilio WS error]", e));
   openaiWS.on("error", (e) => console.error("[OpenAI WS error]", e));
