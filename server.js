@@ -17,13 +17,12 @@ process.on("unhandledRejection", (err) => console.error("[Unhandled]", err));
 
 const server = http.createServer((req, res) => {
   if (req.url === "/voice") {
-    // NOTE: removed track="both"
     const twiml = `
       <Response>
         <Say voice="alice">Connecting you to Barber A I.</Say>
-        <Connect>
+        <Start>
           <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" track="both_tracks" />
-        </Connect>
+        </Start>
       </Response>
     `.trim();
 
