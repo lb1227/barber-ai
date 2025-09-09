@@ -3,15 +3,13 @@ import { WebSocketServer, WebSocket } from "ws";
 
 const PORT = process.env.PORT || 10000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_REALTIME_MODEL =
-  process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview";
+const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview";
+const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY env var");
   process.exit(1);
 }
-
-const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
 
 // crash visibility
 process.on("uncaughtException", (err) => console.error("[Uncaught]", err));
@@ -19,11 +17,12 @@ process.on("unhandledRejection", (err) => console.error("[Unhandled]", err));
 
 const server = http.createServer((req, res) => {
   if (req.url === "/voice") {
+    // NOTE: removed track="both"
     const twiml = `
       <Response>
         <Say voice="alice">Connecting you to Barber A I.</Say>
         <Connect>
-          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" track="both" />
+          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" />
         </Connect>
       </Response>
     `.trim();
@@ -32,15 +31,22 @@ const server = http.createServer((req, res) => {
     return res.end(twiml);
   }
 
-  // default health check
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("Barber AI Realtime bridge is alive.\n");
 });
 
+// ✅ add lightweight HTTP/WS logs AFTER the server exists
+server.on("request", (req) => {
+  console.log("[HTTP]", req.method, req.url, "ua=", req.headers["user-agent"]);
+});
 
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({
+  noServer: true,
+  perMessageDeflate: false, // optional: avoids rare negotiation issues
+});
 
 server.on("upgrade", (req, socket, head) => {
+  console.log("[UPGRADE]", req.url, "ua=", req.headers["user-agent"], "xfwd=", req.headers["x-forwarded-for"]);
   if (req.url === "/media") {
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit("connection", ws, req);
