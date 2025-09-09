@@ -190,19 +190,22 @@ wss.on("connection", (twilioWS) => {
       const msg = JSON.parse(raw.toString());
 
       // === commit after ~100ms (5 frames); no timer, no manual cancel ===
-      if (msg.event === "media") {
+            if (msg.event === "media") {
+        // Ignore Twilio's outbound track to prevent feedback/self-talk
+        const track = msg.media?.track || msg.track;
+        if (track && track !== "inbound") return;
+      
         const b64 = msg.media?.payload;
         if (b64) {
           // Append caller audio to OpenAI buffer
           safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
-
+      
           // Commit every ~100ms (5 x ~20ms frames)
           framesSinceCommit += 1;
           if (framesSinceCommit >= 5) {
             safeSendOpenAI({ type: "input_audio_buffer.commit" });
             framesSinceCommit = 0;
-
-            // Ask for a response if one isn't already in flight
+      
             if (!awaitingResponse) {
               safeSendOpenAI({
                 type: "response.create",
@@ -214,6 +217,7 @@ wss.on("connection", (twilioWS) => {
         }
         return;
       }
+
       // === END ===
   
       if (msg.event === "start") {
