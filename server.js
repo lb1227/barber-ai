@@ -68,7 +68,7 @@ wss.on("connection", (twilioWS) => {
   const CANCEL_AFTER_MS = 200;     // if caller talks this long, cancel the active reply
   let lastCreateTs = 0;            // debounce guard for response.create
   const CREATE_DEBOUNCE_MS = 600;
- 
+
   const safeSendTwilio = (msgObj) => {
     if (!twilioReady || !streamSid) {
       if (msgObj?.event === "media") pendingAudio.push(msgObj);
@@ -95,17 +95,42 @@ wss.on("connection", (twilioWS) => {
     }
   };
 
-  // --- helper to send assistant audio to Twilio on OUTBOUND track in ~20ms frames
+  // ====== ONLY CHANGE START: paced outbound audio ======
+  const outQueue = [];
+  let outTimer = null;
+  let markCounter = 0;
+
+  // send assistant audio to Twilio in ~20ms G.711 μ-law frames at real-time pace
   function sendToTwilioOut(base64Audio) {
     if (!base64Audio) return;
     const buf = Buffer.from(base64Audio, "base64");
-    for (let i = 0; i < buf.length; i += 160) { // 160 bytes ≈ 20ms @ 8k μ-law
-      const chunk = buf.subarray(i, i + 160).toString("base64");
-      // CHANGED: removed track: "outbound"
-      safeSendTwilio({ event: "media", media: { payload: chunk } });
+    // 160 bytes ≈ 20ms @ 8kHz μ-law
+    for (let i = 0; i < buf.length; i += 160) {
+      outQueue.push(buf.subarray(i, i + 160).toString("base64"));
     }
-    if (streamSid) safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
+    if (!outTimer) {
+      outTimer = setInterval(() => {
+        if (!outQueue.length) {
+          clearInterval(outTimer);
+          outTimer = null;
+          return;
+        }
+        if (!twilioReady || !streamSid || twilioWS.readyState !== WebSocket.OPEN) {
+          return; // stay queued until ready
+        }
+        const payload = outQueue.shift();
+        if (payload) {
+          safeSendTwilio({ event: "media", media: { payload } });
+          // mark occasionally (every ~1s) instead of every frame
+          if (++markCounter >= 50) { // 50 * 20ms ≈ 1000ms
+            markCounter = 0;
+            safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
+          }
+        }
+      }, 20);
+    }
   }
+  // ====== ONLY CHANGE END ======
 
   // ---- OpenAI client socket ------------------------------------------------
   const openaiWS = new WebSocket(
@@ -171,7 +196,6 @@ wss.on("connection", (twilioWS) => {
         isSpeaking = true;
         if (!mutedTTS) {                            // <— only play TTS if we’re not barge-muted
           const payload = msg.audio || msg.delta;
-          // CHANGED: chunk + (no track field)
           sendToTwilioOut(payload);
         }
 
