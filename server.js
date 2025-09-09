@@ -128,9 +128,6 @@ wss.on("connection", (twilioWS) => {
         input_audio_format: "g711_ulaw",   // Twilio inbound audio format
         turn_detection: {                   // Server VAD
           type: "server_vad",
-          threshold: 0.5,
-          silence_duration_ms: 500,
-          prefix_padding_ms: 200
           threshold: 0.35,
           silence_duration_ms: 350,
           prefix_padding_ms: 150
@@ -140,7 +137,7 @@ wss.on("connection", (twilioWS) => {
       },
     });
 
-    // Flush queued messages
+  // Flush queued messages
     while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
   });
 
