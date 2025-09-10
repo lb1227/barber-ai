@@ -68,10 +68,15 @@ function calendarClient() {
 }
 
 export async function whoAmI() {
-  const auth = createOAuth2();
-  const oauth2 = google.oauth2({ version: "v2", auth });
-  const { data } = await oauth2.userinfo.get();
-  return data; // { email, ... }
+  try {
+    const auth = createOAuth2();
+    const oauth2 = google.oauth2({ version: "v2", auth });
+    const { data } = await oauth2.userinfo.get();
+    return data;
+  } catch (e) {
+    console.error("[whoAmI] error", e?.response?.data || e);
+    throw e;
+  }
 }
 
 export async function listEventsToday() {
