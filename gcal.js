@@ -99,18 +99,16 @@ function audit(type, payload) {
   fs.appendFile("audit.log", JSON.stringify(entry) + "\n", () => {});
 }
 
-export async function createEvent({ summary, start, end, attendees = [] }) {
-  const cal = calendarClient(); // ✅ use your client
-  const calendarId = CALENDAR_ID || "primary"; // ✅ consistent env
-
+export async function createEvent({ summary, start, end, attendees = [], description = "" }) {
   try {
-    const res = await cal.events.insert({
-      calendarId,
+    const res = await calendar.events.insert({
+      calendarId: process.env.GCAL_CALENDAR_ID || "primary",
       requestBody: {
         summary,
+        description,
         start: { dateTime: start },
         end: { dateTime: end },
-        attendees: attendees.map(email => ({ email })),
+        attendees: attendees.map((email) => ({ email })),
       },
     });
 
@@ -121,16 +119,15 @@ export async function createEvent({ summary, start, end, attendees = [] }) {
       "summary=", ev.summary,
       "start=", ev.start?.dateTime,
       "end=", ev.end?.dateTime,
-      "attendees=", (ev.attendees || []).map(a => a.email).join(",")
+      "attendees=", (ev.attendees || []).map((a) => a.email).join(",")
     );
-
     audit("gcal.create", {
       id: ev.id,
       summary: ev.summary,
       start: ev.start?.dateTime,
       end: ev.end?.dateTime,
-      attendees: (ev.attendees || []).map(a => a.email),
-      htmlLink: ev.htmlLink
+      attendees: (ev.attendees || []).map((a) => a.email),
+      htmlLink: ev.htmlLink,
     });
 
     return ev;
@@ -140,3 +137,4 @@ export async function createEvent({ summary, start, end, attendees = [] }) {
     throw err;
   }
 }
+
