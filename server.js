@@ -3,23 +3,24 @@ import { WebSocketServer, WebSocket } from "ws";
 
 const PORT = process.env.PORT || 10000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_REALTIME_MODEL =
-  process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview";
+const OPENAI_REALTIME_MODEL = process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview";
+const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY env var");
   process.exit(1);
 }
 
-const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
+// crash visibility
+process.on("uncaughtException", (err) => console.error("[Uncaught]", err));
+process.on("unhandledRejection", (err) => console.error("[Unhandled]", err));
 
 const server = http.createServer((req, res) => {
   if (req.url === "/voice") {
     const twiml = `
       <Response>
-        <Say voice="alice">Connecting you to Barber A I.</Say>
         <Connect>
-          <Stream url="wss://…/media" track="both_tracks" />
+          <Stream url="wss://barber-ai.onrender.com/media" track="inbound_track"/>
         </Connect>
       </Response>
     `.trim();
@@ -28,15 +29,22 @@ const server = http.createServer((req, res) => {
     return res.end(twiml);
   }
 
-  // default health check
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("Barber AI Realtime bridge is alive.\n");
 });
 
+// ✅ add lightweight HTTP/WS logs AFTER the server exists
+server.on("request", (req) => {
+  console.log("[HTTP]", req.method, req.url, "ua=", req.headers["user-agent"]);
+});
 
-const wss = new WebSocketServer({ noServer: true });
+const wss = new WebSocketServer({
+  noServer: true,
+  perMessageDeflate: false, // optional: avoids rare negotiation issues
+});
 
 server.on("upgrade", (req, socket, head) => {
+  console.log("[UPGRADE]", req.url, "ua=", req.headers["user-agent"], "xfwd=", req.headers["x-forwarded-for"]);
   if (req.url === "/media") {
     wss.handleUpgrade(req, socket, head, (ws) => {
       wss.emit("connection", ws, req);
@@ -50,14 +58,14 @@ wss.on("connection", (twilioWS) => {
   console.log("[Twilio] connected");
 
   // ---- state/guards --------------------------------------------------------
-  // AFTER
   let twilioReady = false;
-  let streamSid = null;                  // NEW: track stream SID
-  let isSpeaking = false;         // TTS in progress
-  let awaitingCancel = false;     // we sent response.cancel, waiting to stop
-  let awaitingResponse = false;   // we have already sent response.create for this
-  let activeResponse = false;      // true while a model response is active
-  let vadSpeechStartMs = null;     // last speech start time from server VAD
+  let streamSid = null;
+  let inboundBytes = 0;
+  let hasInboundAudio = false;
+  let isSpeaking = false;
+  let awaitingCancel = false;
+  let awaitingResponse = false; // response currently in flight
+  let greetingInFlight = false; // initial greeting turn
   const pendingAudio = [];
   
   const safeSendTwilio = (msgObj) => {
@@ -138,112 +146,88 @@ wss.on("connection", (twilioWS) => {
 
   // Forward OpenAI audio -> Twilio (buffer until Twilio ready)
   openaiWS.on("message", (data) => {
-  try {
-    const msg = JSON.parse(data.toString());
-    if (!["response.output_audio.delta", "error"].includes(msg.type)) {
-      console.log("[OpenAI EVENT]", msg.type, JSON.stringify(msg).slice(0, 400));
-    }
-
-    if (
-      (msg.type === "response.output_audio.delta" || msg.type === "response.audio.delta") &&
-      (msg.audio || msg.delta)
-    ) {
-      // model is speaking
-      isSpeaking = true;
-      const payload = msg.audio || msg.delta; // base64 G.711 μ-law
-      safeSendTwilio({ event: "media", media: { payload } });
-      if (streamSid) safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
-
-    } else if (msg.type === "response.created") {
-      // a response is now active
-      activeResponse = true;
-
-    } else if (msg.type === "response.audio.done") {
-      // TTS finished
-      isSpeaking = false;
-      awaitingCancel = false;
-      activeResponse = false;
-
-    } else if (msg.type === "response.canceled") {
-      // cancel confirmed
-      isSpeaking = false;
-      awaitingCancel = false;
-      activeResponse = false;
-
-    } else if (msg.type === "response.done") {
-      // turn ended
-      isSpeaking = false;
-      awaitingCancel = false;
-      activeResponse = false;
-      awaitingResponse = false;
-
-    } else if (msg.type === "input_audio_buffer.speech_started") {
-      // remember when speech began
-      vadSpeechStartMs = msg.audio_start_ms ?? Date.now();
-
-    } else if (msg.type === "input_audio_buffer.speech_stopped") {
-      // only reply to real utterances, not short blips
-      const durMs = (msg.audio_end_ms ?? 0) - (vadSpeechStartMs ?? 0);
-      vadSpeechStartMs = null;
-
-      if (durMs < 700) {
-        // ignore quick/noisy bursts
-        safeSendOpenAI({ type: "input_audio_buffer.clear" });
-        return;
+    try {
+      const msg = JSON.parse(data.toString());
+      if (!["response.output_audio.delta", "error"].includes(msg.type)) {
+        console.log("[OpenAI EVENT]", msg.type, JSON.stringify(msg).slice(0, 400));
+      }
+  
+      if (msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") {
+        isSpeaking = true;
+        const payload = msg.audio || msg.delta; // base64 μ-law
+        safeSendTwilio({ event: "media", media: { payload } });
+        if (streamSid) safeSendTwilio({ event: "mark", streamSid, mark: { name: "chunk" } });
+      }
+      else if (msg.type === "response.audio.done") {
+        isSpeaking = false;
+        awaitingCancel = false;
+      }
+      else if (msg.type === "response.canceled") {
+        isSpeaking = false;
+        awaitingCancel = false;
+        // awaitingResponse clears on response.done
+      }
+      else if (msg.type === "response.done") {
+        isSpeaking = false;
+        awaitingCancel = false;
+        awaitingResponse = false;
+        if (greetingInFlight) {
+          console.log("[State] greeting done");
+          greetingInFlight = false;
+        }
+      }
+      else if (msg.type === "error") {
+        console.error("[OpenAI ERROR]", msg);
       }
 
-      if (!awaitingResponse) {
-        safeSendOpenAI({
-          type: "response.create",
-          response: { modalities: ["audio", "text"], conversation: "auto" },
-        });
-        awaitingResponse = true;
-      }
-
-    } else if (msg.type === "error") {
-      console.error("[OpenAI ERROR]", msg);
+    } catch (e) {
+      console.error("OpenAI message parse error", e);
     }
-  } catch (e) {
-    console.error("OpenAI message parse error", e);
-  }
-});
+  });
+
 
 
   // ---- Twilio inbound ------------------------------------------------------
-      twilioWS.on("message", (raw) => {
-        try {
-          const msg = JSON.parse(raw.toString());
+  twilioWS.on("message", (raw) => {
+    try {
+      const msg = JSON.parse(raw.toString());
+  
+      if (msg.event === "media") {
+        if (isSpeaking && awaitingResponse && !awaitingCancel) {
+          safeSendOpenAI({ type: "response.cancel" });
+          awaitingCancel = true;
+        }
       
-                if (msg.event === "media") {
-      // Ignore anything except the inbound track to prevent feedback/self-talk
-      const track = msg.media?.track || msg.track;
-      if (track && track !== "inbound") return;
-    
-      // Barge-in: stop TTS only if a response is actually active
-      if (activeResponse && isSpeaking && !awaitingCancel) {
-        safeSendOpenAI({ type: "response.cancel" });
-        awaitingCancel = true;
+        const b64 = msg.media?.payload;
+        if (b64) {
+          hasInboundAudio = true;
+          inboundBytes += Buffer.from(b64, "base64").length;
+          safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
+          pendingCommit = true;
+          startCommitTimerIfNeeded();
+        }
+        return;
       }
-    
-      const b64 = msg.media?.payload;
-      if (b64) {
-        // Append caller audio; DO NOT commit manually when using server_vad
-        safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
-      }
-      return;
-    }
+
+
+
   
       if (msg.event === "start") {
         console.log("[Twilio] stream start:", msg.start.streamSid, "tracks:", msg.start.tracks);
         streamSid = msg.start.streamSid;
         twilioReady = true;
         flushPendingAudio?.();
-  
-        // Greeting
+      
+        // treat greeting as an active response
+        greetingInFlight = true;
+        awaitingResponse = true;
+        console.log("[Greeting] response.create");
+      
         safeSendOpenAI({
           type: "response.create",
           response: {
-            instructions: "Say exactly: 'Hello from Barber AI. If you can hear this, the OpenAI link works.'",
+            instructions:
+              "Say exactly: 'Hello from Barber AI. If you can hear this, the OpenAI link works.'",
             modalities: ["audio", "text"],
             conversation: "none",
           },
@@ -268,13 +252,51 @@ wss.on("connection", (twilioWS) => {
     }
   });
   
+
+
+  const COMMIT_THRESHOLD = 2000; // ~200–250ms μ-law
+    const COMMIT_MS = 150;
+    let commitTimer = null;
+    let pendingCommit = false;
+    
+    function startCommitTimerIfNeeded() {
+      if (commitTimer) return;
+      commitTimer = setInterval(() => {
+        if (!hasInboundAudio) return;
+        if (openaiWS.readyState !== WebSocket.OPEN) return;
+    
+        if (pendingCommit &&
+            inboundBytes >= COMMIT_THRESHOLD &&
+            !awaitingResponse &&
+            !greetingInFlight) {
+          console.log("[Commit] sending with", inboundBytes, "bytes");
+          safeSendOpenAI({ type: "input_audio_buffer.commit" });
+          safeSendOpenAI({
+            type: "response.create",
+            response: { modalities: ["audio", "text"], conversation: "auto" },
+          });
+          awaitingResponse = true;
+          inboundBytes = 0;
+          pendingCommit = false;
+        }
+      }, COMMIT_MS);
+    }
+  
+  function stopCommitTimer() {
+    if (commitTimer) {
+      clearInterval(commitTimer);
+      commitTimer = null;
+    }
+  }
   
   twilioWS.on("close", () => {
     console.log("[Twilio] closed");
+    stopCommitTimer();
     safeClose(openaiWS);
   });
   openaiWS.on("close", () => {
     console.log("[OpenAI] closed");
+    stopCommitTimer();
     safeClose(twilioWS);
   });
 
