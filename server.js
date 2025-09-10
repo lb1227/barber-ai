@@ -95,7 +95,14 @@ const server = http.createServer(async (req, res) => {
         return res.end("Provide start and end ISO strings");
       }
 
+      console.log("[HTTP] /gcal/create",
+        "summary=", summary, "start=", start, "end=", end, "attendees=", attendees.join(",")
+      );
+      
       const event = await createEvent({ summary, start, end, attendees });
+      
+      console.log("[HTTP] /gcal/create OK id=", event.id);
+      
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify(event, null, 2));
     }
