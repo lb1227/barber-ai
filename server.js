@@ -19,10 +19,10 @@ const server = http.createServer((req, res) => {
   if (req.url === "/voice") {
     const twiml = `
       <Response>
-        <Say voice="alice">Connecting you to Barber A I.</Say>
-        <Start>
-          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" track="both_tracks" />
-        </Start>
+        <Say voice="alice">Starting inbound stream.</Say>
+        <Connect>
+          <Stream url="wss://barber-ai.onrender.com/media" track="inbound_track"/>
+        </Connect>
       </Response>
     `.trim();
 
