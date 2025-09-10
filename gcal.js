@@ -100,9 +100,10 @@ function audit(type, payload) {
 }
 
 export async function createEvent({ summary, start, end, attendees = [], description = "" }) {
+  const calendar = calendarClient();
   try {
     const res = await calendar.events.insert({
-      calendarId: process.env.GCAL_CALENDAR_ID || "primary",
+      calendarId: CALENDAR_ID,
       requestBody: {
         summary,
         description,
