@@ -4,6 +4,11 @@ import { WebSocketServer, WebSocket } from "ws";
 import { getAuthUrl, handleOAuthCallback, whoAmI, listEventsToday, createEvent } from "./gcal.js";
 import { URL } from "url";
 
+function parseToolArgs(maybeJSON) {
+  try { return typeof maybeJSON === "string" ? JSON.parse(maybeJSON) : maybeJSON; }
+  catch { return {}; }
+}
+
 /**
  * ENV
  * - OPENAI_API_KEY (required)
@@ -325,12 +330,51 @@ wss.on("connection", (twilioWS) => {
         `[TURN] committing: ${capturedFrames.length} frames, ${collectedBytes} bytes`
       );
       safeSendOpenAI({
-        type: "response.create",
-        response: {
-          modalities: ["audio", "text"],
-          conversation: "auto",
-          instructions:
-      "Respond ONLY in American English. If the last user speech was not English, reply once with 'Sorry—I only speak English.' then stay silent until English is detected. Keep replies brief.",
+        type: "session.update",
+        session: {
+          modalities: ["text", "audio"],
+          voice: "alloy",
+          output_audio_format: "g711_ulaw",
+          input_audio_format: "g711_ulaw",
+      
+          // Let the model call our booking tool:
+          tools: [
+            {
+              type: "function",
+              name: "book_appointment",
+              description:
+                "Create a Google Calendar event for a haircut/barber service. " +
+                "Ask for any missing details before calling this.",
+              parameters: {
+                type: "object",
+                properties: {
+                  customer_name: { type: "string", description: "Caller’s name" },
+                  phone: { type: "string", description: "Caller phone, if known" },
+                  service: { type: "string", description: "Service name" },
+                  start_iso: {
+                    type: "string",
+                    description:
+                      "Start time in ISO 8601, including timezone (e.g., 2025-09-10T15:00:00-04:00)",
+                  },
+                  duration_min: {
+                    type: "number",
+                    description: "Duration in minutes (e.g., 30)",
+                    default: 30,
+                  },
+                  notes: { type: "string", description: "Optional extra notes" },
+                  attendees: {
+                    type: "array",
+                    items: { type: "string" },
+                    description: "Optional attendee emails",
+                  },
+                },
+                required: ["customer_name", "service", "start_iso", "duration_min"],
+              },
+            },
+          ],
+          tool_choice: "auto",
+      
+          instructions: INSTRUCTIONS,
         },
       });
 
@@ -338,6 +382,55 @@ wss.on("connection", (twilioWS) => {
       resetUserCapture();
     }
   }
+
+  async function handleBookAppointment(args) {
+  // Basic validation & shaping
+  const {
+    customer_name,
+    phone,
+    service,
+    start_iso,
+    duration_min = 30,
+    notes = "",
+    attendees = [],
+  } = args || {};
+
+  if (!customer_name || !service || !start_iso || !duration_min) {
+    return { ok: false, error: "Missing required fields." };
+  }
+
+  const start = new Date(start_iso);
+  if (isNaN(start.getTime())) {
+    return { ok: false, error: "Invalid start time." };
+  }
+  const end = new Date(start.getTime() + duration_min * 60 * 1000);
+
+  const summary = `${service} — ${customer_name}`;
+  const description =
+    `Booked by phone receptionist.\n` +
+    (phone ? `Phone: ${phone}\n` : "") +
+    (notes ? `Notes: ${notes}\n` : "");
+
+  try {
+    const ev = await createEvent({
+      summary,
+      start: start.toISOString(),
+      end: end.toISOString(),
+      attendees,
+      description,
+    });
+    return {
+      ok: true,
+      id: ev.id,
+      htmlLink: ev.htmlLink,
+      start: ev.start?.dateTime,
+      end: ev.end?.dateTime,
+      summary: ev.summary,
+    };
+  } catch (e) {
+    return { ok: false, error: e?.message || "Calendar error" };
+  }
+}
 
   // ---------- OpenAI socket ----------
   openaiWS.on("open", () => {
@@ -348,18 +441,57 @@ wss.on("connection", (twilioWS) => {
       session: {
         modalities: ["text", "audio"],
         voice: "alloy",
-        output_audio_format: "g711_ulaw", // matches Twilio playback
-        input_audio_format: "g711_ulaw", // we send μ-law to the buffer
-        // IMPORTANT: no server VAD; we control commits.
+        output_audio_format: "g711_ulaw",
+        input_audio_format: "g711_ulaw",
+    
+        // Expose the booking tool to the model:
+        tools: [
+          {
+            type: "function",
+            name: "book_appointment",
+            description:
+              "Create a Google Calendar event for a haircut/barber service. " +
+              "Ask for any missing details before calling this.",
+            parameters: {
+              type: "object",
+              properties: {
+                customer_name: { type: "string", description: "Caller’s name" },
+                phone: { type: "string", description: "Caller phone, if known" },
+                service: { type: "string", description: "Service name" },
+                start_iso: {
+                  type: "string",
+                  description:
+                    "Start time in ISO 8601 with timezone (e.g. 2025-09-10T15:00:00-04:00)",
+                },
+                duration_min: {
+                  type: "number",
+                  description: "Duration in minutes (e.g. 30)",
+                  default: 30,
+                },
+                notes: { type: "string", description: "Optional extra notes" },
+                attendees: {
+                  type: "array",
+                  items: { type: "string" },
+                  description: "Optional attendee emails",
+                },
+              },
+              required: ["customer_name", "service", "start_iso", "duration_min"],
+            },
+          },
+        ],
+        tool_choice: "auto",
+    
+        // No server VAD; we control turns. Also behavior rules:
         instructions: INSTRUCTIONS,
       },
     });
+
 
     // flush queued messages if any
     while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
   });
 
-  openaiWS.on("message", (data) => {
+  openaiWS.on("message", async (data) => {
     let msg;
     try {
       msg = JSON.parse(data.toString());
@@ -367,26 +499,137 @@ wss.on("connection", (twilioWS) => {
       console.error("[OpenAI] parse error");
       return;
     }
-
+  
     // Log selectively
     if (!["response.output_audio.delta", "response.audio.delta"].includes(msg.type)) {
       console.log("[OpenAI EVENT]", msg.type);
     }
-
+  
+    // ====== AUDIO STREAMING ======
     if (msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") {
-      // Assistant is speaking → stream to Twilio
       isAssistantSpeaking = true;
       const payload = msg.audio || msg.delta; // base64 μ-law
       safeSendTwilio({ event: "media", media: { payload } });
-    } else if (msg.type === "response.audio.done") {
+      return;
+    }
+    if (msg.type === "response.audio.done") {
       isAssistantSpeaking = false;
-    } else if (msg.type === "response.done") {
+      return;
+    }
+    if (msg.type === "response.done") {
       isAssistantSpeaking = false;
       awaitingResponse = false;
-      // ensure we clear the model input buffer after each turn (defensive)
       safeSendOpenAI({ type: "input_audio_buffer.clear" });
-    } else if (msg.type === "error") {
+      return;
+    }
+    if (msg.type === "error") {
       console.error("[OpenAI ERROR]", msg);
+      return;
+    }
+  
+    // ====== TOOL CALLS (Realtime can emit a few shapes; handle the common ones) ======
+    // 1) Newer shape: response.tool_call.created / delta / completed
+    if (msg.type === "response.tool_call.created" || msg.type === "response.tool_call.delta") {
+      // We accumulate args per call_id until 'completed'
+      openaiWS._toolCalls = openaiWS._toolCalls || {};
+      const call = msg.tool_call || {};
+      const id = call.id || msg.call_id;
+      if (!id) return;
+  
+      const name = call.name;
+      openaiWS._toolCalls[id] = openaiWS._toolCalls[id] || { name, argsText: "" };
+      if (typeof call.arguments === "string") {
+        openaiWS._toolCalls[id].argsText += call.arguments; // streamed JSON
+      }
+      return;
+    }
+  
+    if (msg.type === "response.tool_call.completed") {
+      try {
+        const id = msg.tool_call?.id || msg.call_id;
+        const entry = openaiWS._toolCalls?.[id];
+        if (!entry) return;
+  
+        const name = entry.name || msg.tool_call?.name;
+        const args = parseToolArgs(entry.argsText || "{}");
+  
+        if (name === "book_appointment") {
+          const result = await handleBookAppointment(args);
+          // Send tool result back so the model can speak a confirmation
+          safeSendOpenAI({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              conversation: "auto",
+              instructions:
+                "Acknowledge the booking result clearly. If it failed, say why and suggest another time.",
+              tool_results: [
+                {
+                  tool_call_id: id,
+                  output: JSON.stringify(result),
+                },
+              ],
+            },
+          });
+        }
+      } catch (e) {
+        console.error("[ToolCall] error:", e);
+        // Return a failure result
+        safeSendOpenAI({
+          type: "response.create",
+          response: {
+            modalities: ["audio", "text"],
+            conversation: "auto",
+            instructions:
+              "Booking failed due to a server error. Apologize and ask the caller for another time.",
+          },
+        });
+      }
+      return;
+    }
+  
+    // 2) Compatibility: function-call style (older clients may emit this)
+    if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
+      const call = msg.item;
+      const name = call.name;
+      const args = parseToolArgs(call.arguments);
+  
+      if (name === "book_appointment") {
+        try {
+          const result = await handleBookAppointment(args);
+          // Report result back via tool result message
+          safeSendOpenAI({
+            type: "conversation.item.create",
+            item: {
+              type: "function_call_output",
+              call_id: call.id,
+              output: JSON.stringify(result),
+            },
+          });
+          // Ask the model to confirm to caller
+          safeSendOpenAI({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              conversation: "auto",
+              instructions:
+                "Confirm the appointment you just booked. If it failed, explain briefly and ask for another time.",
+            },
+          });
+        } catch (e) {
+          console.error("[FunctionCall] error:", e);
+          safeSendOpenAI({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              conversation: "auto",
+              instructions:
+                "Booking failed due to a server error. Apologize and ask the caller for another time.",
+            },
+          });
+        }
+      }
+      return;
     }
   });
 
