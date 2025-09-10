@@ -319,67 +319,38 @@ wss.on("connection", (twilioWS) => {
     if ((utteranceLongEnough && endedBySilence) || endedByTimeout) {
       // Build a single base64 by concatenation (OpenAI accepts incremental appends;
       // we’ll just append frames then commit once)
-      for (const f of capturedFrames) {
-        safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
-      }
-      safeSendOpenAI({ type: "input_audio_buffer.commit" });
-
-      // Create assistant response (audio + text)
-      awaitingResponse = true;
-      console.log(
-        `[TURN] committing: ${capturedFrames.length} frames, ${collectedBytes} bytes`
-      );
-      safeSendOpenAI({
-        type: "session.update",
-        session: {
-          modalities: ["text", "audio"],
-          voice: "alloy",
-          output_audio_format: "g711_ulaw",
-          input_audio_format: "g711_ulaw",
-      
-          // Let the model call our booking tool:
-          tools: [
-            {
-              type: "function",
-              name: "book_appointment",
-              description:
-                "Create a Google Calendar event for a haircut/barber service. " +
-                "Ask for any missing details before calling this.",
-              parameters: {
-                type: "object",
-                properties: {
-                  customer_name: { type: "string", description: "Caller’s name" },
-                  phone: { type: "string", description: "Caller phone, if known" },
-                  service: { type: "string", description: "Service name" },
-                  start_iso: {
-                    type: "string",
-                    description:
-                      "Start time in ISO 8601, including timezone (e.g., 2025-09-10T15:00:00-04:00)",
-                  },
-                  duration_min: {
-                    type: "number",
-                    description: "Duration in minutes (e.g., 30)",
-                    default: 30,
-                  },
-                  notes: { type: "string", description: "Optional extra notes" },
-                  attendees: {
-                    type: "array",
-                    items: { type: "string" },
-                    description: "Optional attendee emails",
-                  },
-                },
-                required: ["customer_name", "service", "start_iso", "duration_min"],
-              },
-            },
-          ],
-          tool_choice: "auto",
-      
-          instructions: INSTRUCTIONS,
-        },
-      });
-
-      // Clear capture for next turn
+     // Guard: only commit if we have ≥100ms (5 frames × 20ms)
+    if (capturedFrames.length < 5) {
+      // too short—probably noise/breath; ignore
       resetUserCapture();
+      return;
+    }
+    
+    // Also: don’t start a new reply if one’s in flight
+    if (awaitingResponse) {
+      resetUserCapture();
+      return;
+    }
+    
+    for (const f of capturedFrames) {
+      safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
+    }
+    safeSendOpenAI({ type: "input_audio_buffer.commit" });
+    
+    // Ask the model to respond (and call tools if needed)
+    awaitingResponse = true;
+    console.log(`[TURN] committing: ${capturedFrames.length} frames, ${collectedBytes} bytes`);
+    safeSendOpenAI({
+      type: "response.create",
+      response: {
+        modalities: ["audio", "text"],
+        conversation: "auto",
+        instructions:
+          "If the caller requested a booking and details are complete, call book_appointment; " +
+          "otherwise ask concise follow-ups. Keep it brief and in American English.",
+      },
+    });
+    resetUserCapture();
     }
   }
 
