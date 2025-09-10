@@ -34,35 +34,6 @@ process.on("unhandledRejection", (err) => console.error("[Unhandled]", err));
 // ---------- HTTP server (TwiML + health) ----------
 const server = http.createServer(async (req, res) => {
   try {
-    console.log("[HTTP]", req.method, req.url);  // <— add this
-    const fullUrl = new URL(req.url, BASE_URL);
-    const path = fullUrl.pathname;
-
-    // use startsWith instead of ===
-    if (path.startsWith("/voice")) { … }
-
-    if (path.startsWith("/auth/google")) {        // <— was ===
-      const url = getAuthUrl();
-      res.writeHead(302, { Location: url });
-      return res.end();
-    }
-
-    if (path.startsWith("/oauth2callback")) {     // <— was ===
-      const code = fullUrl.searchParams.get("code");
-      …
-    }
-
-    if (path.startsWith("/gcal/me")) { … }
-    if (path.startsWith("/gcal/today")) { … }
-    if (path.startsWith("/gcal/create")) { … }
-
-    // (Optional) friendly error if not connected yet
-    // before /gcal/me:
-    // if (!fs.existsSync("./google_tokens.json")) { … }
-
-    // default health
-    res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("Barber AI Realtime bridge is alive.\n");
     // Parse URL & query safely (BASE_URL already defined in your file)
     const fullUrl = new URL(req.url, BASE_URL);
     const path = fullUrl.pathname;
