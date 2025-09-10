@@ -498,111 +498,88 @@ wss.on("connection", (twilioWS) => {
       return;
     }
   
-    // ====== TOOL CALLS (Realtime can emit a few shapes; handle the common ones) ======
-    // 1) Newer shape: response.tool_call.created / delta / completed
-    if (msg.type === "response.tool_call.created" || msg.type === "response.tool_call.delta") {
-      // We accumulate args per call_id until 'completed'
-      openaiWS._toolCalls = openaiWS._toolCalls || {};
-      const call = msg.tool_call || {};
-      const id = call.id || msg.call_id;
-      if (!id) return;
-  
+    // ====== TOOL CALLS (handle all three shapes) ======
+    openaiWS._toolCalls = openaiWS._toolCalls || {};
+    
+    // A) Older "function_call" item shape
+    if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
+      const call = msg.item;
+      const id = call.id;
       const name = call.name;
+      // seed storage
       openaiWS._toolCalls[id] = openaiWS._toolCalls[id] || { name, argsText: "" };
       if (typeof call.arguments === "string") {
-        openaiWS._toolCalls[id].argsText += call.arguments; // streamed JSON
+        openaiWS._toolCalls[id].argsText += call.arguments;
       }
       return;
     }
-  
+    
+    // B) Newer "response.tool_call.*" shape
+    if (msg.type === "response.tool_call.created" || msg.type === "response.tool_call.delta") {
+      const call = msg.tool_call || {};
+      const id = call.id || msg.call_id;
+      if (!id) return;
+      const name = call.name;
+      openaiWS._toolCalls[id] = openaiWS._toolCalls[id] || { name, argsText: "" };
+      if (typeof call.arguments === "string") {
+        openaiWS._toolCalls[id].argsText += call.arguments;
+      }
+      return;
+    }
+    
     if (msg.type === "response.tool_call.completed") {
-      try {
-        const id = msg.tool_call?.id || msg.call_id;
-        const entry = openaiWS._toolCalls?.[id];
-        if (!entry) return;
-  
-        const name = entry.name || msg.tool_call?.name;
-        const args = parseToolArgs(entry.argsText || "{}");
-  
-        if (name === "book_appointment") {
-          const result = await handleBookAppointment(args);
-          // Send tool result back so the model can speak a confirmation
-          safeSendOpenAI({
-            type: "response.create",
-            response: {
-              modalities: ["audio", "text"],
-              conversation: "auto",
-              instructions:
-                "Acknowledge the booking result clearly. If it failed, say why and suggest another time.",
-              tool_results: [
-                {
-                  tool_call_id: id,
-                  output: JSON.stringify(result),
-                },
-              ],
-            },
-          });
-        }
-      } catch (e) {
-        console.error("[ToolCall] error:", e);
-        // Return a failure result
+      const id = msg.tool_call?.id || msg.call_id;
+      const entry = id ? openaiWS._toolCalls[id] : null;
+      if (!entry) return;
+      const args = parseToolArgs(entry.argsText || "{}");
+      if (entry.name === "book_appointment") {
+        const result = await handleBookAppointment(args);
         safeSendOpenAI({
           type: "response.create",
           response: {
             modalities: ["audio", "text"],
             conversation: "auto",
-            instructions:
-              "Booking failed due to a server error. Apologize and ask the caller for another time.",
+            instructions: "Acknowledge the booking result clearly. If it failed, say why and suggest another time.",
+            tool_results: [{ tool_call_id: id, output: JSON.stringify(result) }],
           },
         });
       }
       return;
     }
-  
-    // 2) Compatibility: function-call style (older clients may emit this)
-    if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
-      const call = msg.item;
-      const name = call.name;
-      const args = parseToolArgs(call.arguments);
-  
-      if (name === "book_appointment") {
-        try {
-          const result = await handleBookAppointment(args);
-          // Report result back via tool result message
-          safeSendOpenAI({
-            type: "conversation.item.create",
-            item: {
-              type: "function_call_output",
-              call_id: call.id,
-              output: JSON.stringify(result),
-            },
-          });
-          // Ask the model to confirm to caller
-          safeSendOpenAI({
-            type: "response.create",
-            response: {
-              modalities: ["audio", "text"],
-              conversation: "auto",
-              instructions:
-                "Confirm the appointment you just booked. If it failed, explain briefly and ask for another time.",
-            },
-          });
-        } catch (e) {
-          console.error("[FunctionCall] error:", e);
-          safeSendOpenAI({
-            type: "response.create",
-            response: {
-              modalities: ["audio", "text"],
-              conversation: "auto",
-              instructions:
-                "Booking failed due to a server error. Apologize and ask the caller for another time.",
-            },
-          });
-        }
+    
+    // C) Also handle the newest "response.function_call_arguments.*" shape
+    if (msg.type === "response.function_call_arguments.delta") {
+      const id = msg.call_id || msg.item_id || msg.id; // the event carries a call identifier
+      const name = msg.name;
+      if (!id) return;
+      openaiWS._toolCalls[id] = openaiWS._toolCalls[id] || { name, argsText: "" };
+      if (typeof msg.delta === "string") {
+        openaiWS._toolCalls[id].argsText += msg.delta; // streamed JSON chunk
       }
       return;
     }
-  });
+    
+    if (msg.type === "response.function_call_arguments.done") {
+      const id = msg.call_id || msg.item_id || msg.id;
+      const entry = id ? openaiWS._toolCalls[id] : null;
+      if (!entry) return;
+      const args = parseToolArgs(entry.argsText || "{}");
+
+      if (entry.name === "book_appointment") {
+        const result = await handleBookAppointment(args);
+        safeSendOpenAI({
+          type: "response.create",
+          response: {
+            modalities: ["audio", "text"],
+            conversation: "auto",
+            instructions: "Acknowledge the booking result clearly. If it failed, say why and suggest another time.",
+            tool_results: [{ tool_call_id: id, output: JSON.stringify(result) }],
+          },
+        });
+      }
+      return;
+    }
+  }); // <-- CLOSES openaiWS.on("message", ...)
 
   // ---------- Twilio inbound ----------
   twilioWS.on("message", (raw) => {
