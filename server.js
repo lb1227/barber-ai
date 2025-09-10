@@ -113,9 +113,9 @@ const VAD = {
   RMS_START: 0.02, // start speaking threshold (~-34 dBFS)
   RMS_CONTINUE: 0.015, // keep speaking threshold
   MIN_SPEECH_MS: 80, // require at least this much speech before we consider it a user turn
-  END_SILENCE_MS: 700, // end of utterance silence
+  END_SILENCE_MS: 1000, // end of utterance silence
   // Barge-in:
-  BARGE_IN_MIN_MS: 100, // must detect this much speech before canceling assistant
+  BARGE_IN_MIN_MS: 75, // must detect this much speech before canceling assistant
   // Idle:
   MAX_TURN_DURATION_MS: 6000, // fallback end to avoid never-ending capture
 };
