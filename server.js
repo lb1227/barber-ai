@@ -16,15 +16,14 @@ if (!OPENAI_API_KEY) {
 /* ---------- server: /voice TwiML + health ---------- */
 const server = http.createServer((req, res) => {
   if (req.url === "/voice") {
-    // Bidirectional stream so Twilio both sends mic audio and plays our audio
     const twiml = `
       <Response>
         <Connect>
-          <Stream url="${WSS_URL}/media" track="both_tracks"/>
+          <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" track="inbound_track"/>
         </Connect>
       </Response>
     `.trim();
-
+  
     res.writeHead(200, { "Content-Type": "text/xml" });
     return res.end(twiml);
   }
