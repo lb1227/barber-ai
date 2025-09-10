@@ -2,97 +2,109 @@
 import { google } from "googleapis";
 import fs from "fs";
 
-const TOKEN_PATH = "./gcal_token.json";
+const {
+  GOOGLE_CLIENT_ID,
+  GOOGLE_CLIENT_SECRET,
+  GOOGLE_REDIRECT_URI,   // e.g. https://barber-ai.onrender.com/oauth2callback
+  CALENDAR_ID = "primary",
+} = process.env;
 
-export function getOAuth() {
-  const {
-    GOOGLE_CLIENT_ID,
-    GOOGLE_CLIENT_SECRET,
-    GOOGLE_REDIRECT_URI
-  } = process.env;
+const TOKEN_PATH = "./google_tokens.json";
+const SCOPES = [
+  "https://www.googleapis.com/auth/calendar.events",
+  "https://www.googleapis.com/auth/calendar.readonly",
+  "https://www.googleapis.com/auth/userinfo.email",
+];
 
-  const oAuth2Client = new google.auth.OAuth2(
+function createOAuth2() {
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REDIRECT_URI) {
+    throw new Error("Missing Google OAuth env vars");
+  }
+  const oauth2 = new google.auth.OAuth2(
     GOOGLE_CLIENT_ID,
     GOOGLE_CLIENT_SECRET,
     GOOGLE_REDIRECT_URI
   );
-
+  // Load tokens from disk if present
   if (fs.existsSync(TOKEN_PATH)) {
-    const token = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
-    oAuth2Client.setCredentials(token);
+    const tokens = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
+    oauth2.setCredentials(tokens);
   }
-  return oAuth2Client;
+  // Persist refresh token updates
+  oauth2.on("tokens", (t) => {
+    const current = fs.existsSync(TOKEN_PATH)
+      ? JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"))
+      : {};
+    fs.writeFileSync(
+      TOKEN_PATH,
+      JSON.stringify({ ...current, ...t }, null, 2),
+      "utf8"
+    );
+  });
+  return oauth2;
 }
 
 export function getAuthUrl() {
-  const oAuth2Client = getOAuth();
-  return oAuth2Client.generateAuthUrl({
-    access_type: "offline",
-    prompt: "consent",
-    scope: [
-      "https://www.googleapis.com/auth/calendar"
-    ],
+  const oauth2 = createOAuth2();
+  return oauth2.generateAuthUrl({
+    access_type: "offline",         // get refresh_token
+    prompt: "consent",              // ensure refresh_token on repeated connects
+    scope: SCOPES,
   });
 }
 
-export async function saveCodeExchange(code) {
-  const oAuth2Client = getOAuth();
-  const { tokens } = await oAuth2Client.getToken(code);
-  // Persist refresh token
-  const merged = { ...tokens };
-  fs.writeFileSync("./gcal_token.json", JSON.stringify(merged, null, 2));
-  oAuth2Client.setCredentials(merged);
+export async function handleOAuthCallback(code) {
+  const oauth2 = createOAuth2();
+  const { tokens } = await oauth2.getToken(code);
+  oauth2.setCredentials(tokens);
+  // Save immediately
+  fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens, null, 2), "utf8");
   return true;
 }
 
 function calendarClient() {
-  const auth = getOAuth();
+  const auth = createOAuth2();
   return google.calendar({ version: "v3", auth });
 }
 
-export async function checkAvailability({ startISO, endISO, calendarId }) {
+export async function whoAmI() {
+  const auth = createOAuth2();
+  const oauth2 = google.oauth2({ version: "v2", auth });
+  const { data } = await oauth2.userinfo.get();
+  return data; // { email, ... }
+}
+
+export async function listEventsToday() {
   const cal = calendarClient();
-  const body = {
-    timeMin: startISO,
-    timeMax: endISO,
-    timeZone: process.env.BUSINESS_TIMEZONE || "UTC",
-    items: [{ id: calendarId }],
+  const now = new Date();
+  const start = new Date(now);
+  start.setHours(0, 0, 0, 0);
+  const end = new Date(now);
+  end.setHours(23, 59, 59, 999);
+
+  const { data } = await cal.events.list({
+    calendarId: CALENDAR_ID,
+    timeMin: start.toISOString(),
+    timeMax: end.toISOString(),
+    singleEvents: true,
+    orderBy: "startTime",
+    maxResults: 25,
+  });
+  return data.items || [];
+}
+
+export async function createEvent({ summary, start, end, attendees = [], description }) {
+  const cal = calendarClient();
+  const event = {
+    summary,
+    description,
+    start: { dateTime: start },
+    end: { dateTime: end },
+    attendees: attendees.map((email) => ({ email })),
   };
-  const { data } = await cal.freebusy.query({ requestBody: body });
-  const busy = data?.calendars?.[calendarId]?.busy || [];
-  return { busy }; // [] means free
-}
-
-export async function createEvent({ calendarId, summary, description, startISO, endISO, attendees = [] }) {
-  const cal = calendarClient();
   const { data } = await cal.events.insert({
-    calendarId,
-    requestBody: {
-      summary,
-      description,
-      start: { dateTime: startISO, timeZone: process.env.BUSINESS_TIMEZONE || "UTC" },
-      end:   { dateTime: endISO,   timeZone: process.env.BUSINESS_TIMEZONE || "UTC" },
-      attendees,
-    },
+    calendarId: CALENDAR_ID,
+    requestBody: event,
   });
-  return { id: data.id, htmlLink: data.htmlLink };
-}
-
-export async function moveEvent({ calendarId, eventId, startISO, endISO }) {
-  const cal = calendarClient();
-  const { data } = await cal.events.patch({
-    calendarId,
-    eventId,
-    requestBody: {
-      start: { dateTime: startISO, timeZone: process.env.BUSINESS_TIMEZONE || "UTC" },
-      end:   { dateTime: endISO,   timeZone: process.env.BUSINESS_TIMEZONE || "UTC" },
-    },
-  });
-  return { id: data.id, htmlLink: data.htmlLink };
-}
-
-export async function cancelEvent({ calendarId, eventId }) {
-  const cal = calendarClient();
-  await cal.events.delete({ calendarId, eventId });
-  return { ok: true };
+  return data;
 }
