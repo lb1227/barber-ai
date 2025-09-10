@@ -93,18 +93,50 @@ export async function listEventsToday() {
   return data.items || [];
 }
 
-export async function createEvent({ summary, start, end, attendees = [], description }) {
-  const cal = calendarClient();
-  const event = {
-    summary,
-    description,
-    start: { dateTime: start },
-    end: { dateTime: end },
-    attendees: attendees.map((email) => ({ email })),
-  };
-  const { data } = await cal.events.insert({
-    calendarId: CALENDAR_ID,
-    requestBody: event,
-  });
-  return data;
+
+function audit(type, payload) {
+  const entry = { ts: new Date().toISOString(), type, ...payload };
+  fs.appendFile("audit.log", JSON.stringify(entry) + "\n", () => {});
+}
+
+export async function createEvent({ summary, start, end, attendees = [] }) {
+  const cal = calendarClient(); // ✅ use your client
+  const calendarId = CALENDAR_ID || "primary"; // ✅ consistent env
+
+  try {
+    const res = await cal.events.insert({
+      calendarId,
+      requestBody: {
+        summary,
+        start: { dateTime: start },
+        end: { dateTime: end },
+        attendees: attendees.map(email => ({ email })),
+      },
+    });
+
+    const ev = res.data;
+    console.log(
+      "[GCAL] created",
+      ev.id,
+      "summary=", ev.summary,
+      "start=", ev.start?.dateTime,
+      "end=", ev.end?.dateTime,
+      "attendees=", (ev.attendees || []).map(a => a.email).join(",")
+    );
+
+    audit("gcal.create", {
+      id: ev.id,
+      summary: ev.summary,
+      start: ev.start?.dateTime,
+      end: ev.end?.dateTime,
+      attendees: (ev.attendees || []).map(a => a.email),
+      htmlLink: ev.htmlLink
+    });
+
+    return ev;
+  } catch (err) {
+    console.error("[GCAL] create error:", err?.response?.data || err.message);
+    audit("gcal.error", { op: "create", message: err.message, stack: err.stack });
+    throw err;
+  }
 }
