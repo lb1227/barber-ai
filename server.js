@@ -487,10 +487,13 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       return;
     }
-    if (msg.type === "response.done") {
+      if (msg.type === "response.done") {
       isAssistantSpeaking = false;
       awaitingResponse = false;
-      safeSendOpenAI({ type: "input_audio_buffer.clear" });
+      // Only clear if we’re not currently capturing a user turn
+      if (!userSpeechActive) {
+        safeSendOpenAI({ type: "input_audio_buffer.clear" });
+      }
       return;
     }
     if (msg.type === "error") {
