@@ -121,10 +121,12 @@ const VAD = {
 };
 
 const INSTRUCTIONS =
-  "You are Barber AI, a receptionist on the phone. Respond ONLY after you detect the caller has spoken. " +
-  "If there is no user speech, remain silent. Keep replies concise and professional. " +
-  "Do not initiate new topics or continue talking without user input. " +
-  "Do not produce fillers or backchannels. If interrupted, stop speaking immediately.";
+  "You are Barber AI, a phone receptionist. STRICT RULES:\n" +
+  "1) Respond ONLY in clear American English.\n" +
+  "2) If the caller is not speaking English, say exactly once: 'Sorry—I only speak English.' Then remain silent until you detect English.\n" +
+  "3) Do NOT reply to background noise, music, tones, or non-speech. Stay silent unless you detect human speech in English.\n" +
+  "4) Be concise and professional. No backchannels. Stop speaking immediately if interrupted.\n" +
+  "5) Never start a conversation on your own. Only respond after the caller has spoken English.";
 
 // ---------- Main bridge ----------
 wss.on("connection", (twilioWS) => {
@@ -259,6 +261,8 @@ wss.on("connection", (twilioWS) => {
         response: {
           modalities: ["audio", "text"],
           conversation: "auto",
+          instructions:
+      "Respond ONLY in American English. If the last user speech was not English, reply once with 'Sorry—I only speak English.' then stay silent until English is detected. Keep replies brief.",
         },
       });
 
