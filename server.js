@@ -1,10 +1,14 @@
-// server.js (ESM)
-// Advanced Twilio <-> OpenAI Realtime bridge with robust barge-in & echo safeguards.
-
+// server.js
 import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
 
-// -------------------------- ENV ---------------------------------------------
+/**
+ * ENV
+ * - OPENAI_API_KEY (required)
+ * - PORT (default 10000)
+ * - BASE_URL (e.g. https://barber-ai.onrender.com)
+ * - OPENAI_REALTIME_MODEL (default gpt-4o-realtime-preview)
+ */
 const PORT = process.env.PORT || 10000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REALTIME_MODEL =
@@ -16,14 +20,15 @@ if (!OPENAI_API_KEY) {
   process.exit(1);
 }
 
-// ----------------------- CRASH VISIBILITY -----------------------------------
-process.on("uncaughtException", (e) => console.error("[Uncaught]", e));
-process.on("unhandledRejection", (e) => console.error("[Unhandled]", e));
+// ---------- Crash visibility ----------
+process.on("uncaughtException", (err) => console.error("[Uncaught]", err));
+process.on("unhandledRejection", (err) => console.error("[Unhandled]", err));
 
-// ----------------------- TWIML HTTP SERVER ----------------------------------
+// ---------- HTTP server (TwiML + health) ----------
 const server = http.createServer((req, res) => {
   if (req.url === "/voice") {
-    // IMPORTANT: Only stream inbound (caller) audio to avoid hearing ourselves.
+    // Stream *inbound* audio only. We synthesize to Twilio via media frames we send back.
+    // No <Say> to avoid speaking before we’re ready.
     const twiml = `
       <Response>
         <Connect>
@@ -36,7 +41,6 @@ const server = http.createServer((req, res) => {
     return res.end(twiml);
   }
 
-  // health
   res.writeHead(200, { "Content-Type": "text/plain" });
   res.end("Barber AI Realtime bridge is alive.\n");
 });
@@ -45,11 +49,8 @@ server.on("request", (req) => {
   console.log("[HTTP]", req.method, req.url, "ua=", req.headers["user-agent"]);
 });
 
-// --------------------------- WS UPGRADE -------------------------------------
-const wss = new WebSocketServer({
-  noServer: true,
-  perMessageDeflate: false,
-});
+// ---------- WS upgrade ----------
+const wss = new WebSocketServer({ noServer: true, perMessageDeflate: false });
 
 server.on("upgrade", (req, socket, head) => {
   console.log(
@@ -69,132 +70,71 @@ server.on("upgrade", (req, socket, head) => {
   }
 });
 
-// ------------------------ AUDIO / VAD HELPERS -------------------------------
-// μ-law to PCM16 decode (fast inline)
-function mulawByteToPcm16(u) {
-  // G.711 μ-law decode
+// ---------- Helpers: μ-law decode + RMS ----------
+function muLawByteToPcm16(u) {
+  // μ-law decode (G.711) – returns int16
+  // Source logic adapted from common G711 tables (no external deps).
   u = ~u & 0xff;
   const sign = u & 0x80;
   let exponent = (u >> 4) & 0x07;
   let mantissa = u & 0x0f;
-  let sample = ((mantissa << 3) + 0x84) << exponent;
-  sample -= 0x84 << exponent;
+  let sample = ((mantissa << 4) + 0x08) << (exponent + 3);
+  sample -= 0x84; // bias
   return sign ? -sample : sample;
 }
 
-// Compute RMS of a μ-law base64 payload
-function ulawBase64Rms(b64) {
+function rmsOfMuLawBase64(b64) {
   try {
     const buf = Buffer.from(b64, "base64");
-    if (buf.length === 0) return 0;
-    let acc = 0;
-    for (let i = 0; i < buf.length; i++) {
-      const s = mulawByteToPcm16(buf[i]);
-      acc += s * s;
+    const len = buf.length;
+    if (!len) return 0;
+    let sumSq = 0;
+    // Sample μ-law bytes sparsely if very large to save CPU
+    const stride = len > 3200 ? Math.floor(len / 1600) : 1;
+    let count = 0;
+    for (let i = 0; i < len; i += stride) {
+      const s = muLawByteToPcm16(buf[i]);
+      sumSq += s * s;
+      count++;
     }
-    const meanSq = acc / buf.length;
-    return Math.sqrt(meanSq); // 0..~32124
+    const meanSq = sumSq / Math.max(1, count);
+    // Normalize to ~0..1 from int16
+    return Math.sqrt(meanSq) / 32768;
   } catch {
     return 0;
   }
 }
 
-// Adaptive VAD with noise floor tracking
-class AdaptiveVad {
-  constructor({
-    minRms = 800, // absolute floor (tune if needed)
-    noiseLearnFrames = 50, // learn baseline during early silence frames
-    boost = 3.5, // threshold multiplier over noise floor
-  } = {}) {
-    this.minRms = minRms;
-    this.noiseLearnFrames = noiseLearnFrames;
-    this.boost = boost;
-    this.learned = 0;
-    this.noiseSum = 0;
-    this.noiseFloor = minRms / 2;
-  }
-  observe(rms, consideredSilent) {
-    if (consideredSilent && this.learned < this.noiseLearnFrames) {
-      this.noiseSum += rms;
-      this.learned++;
-      this.noiseFloor = Math.max(200, this.noiseSum / this.learned);
-    }
-  }
-  isSpeech(rms) {
-    const dyn = Math.max(this.minRms, this.noiseFloor * this.boost);
-    return rms >= dyn;
-  }
-}
+// ---------- Conversation policies (tunable) ----------
+const VAD = {
+  // Audio sampled at 8kHz in G.711 μ-law
+  FRAME_MS: 20, // Twilio sends ~20ms media frames
+  // Speech detection:
+  RMS_START: 0.02, // start speaking threshold (~-34 dBFS)
+  RMS_CONTINUE: 0.015, // keep speaking threshold
+  MIN_SPEECH_MS: 160, // require at least this much speech before we consider it a user turn
+  END_SILENCE_MS: 350, // end of utterance silence
+  // Barge-in:
+  BARGE_IN_MIN_MS: 140, // must detect this much speech before canceling assistant
+  // Idle:
+  MAX_TURN_DURATION_MS: 6000, // fallback end to avoid never-ending capture
+};
 
-// ----------------------------- CONNECTION -----------------------------------
+const INSTRUCTIONS =
+  "You are Barber AI, a receptionist on the phone. Respond ONLY after you detect the caller has spoken. " +
+  "If there is no user speech, remain silent. Keep replies concise and professional. " +
+  "Do not initiate new topics or continue talking without user input. " +
+  "Do not produce fillers or backchannels. If interrupted, stop speaking immediately.";
+
+// ---------- Main bridge ----------
 wss.on("connection", (twilioWS) => {
   console.log("[Twilio] connected");
 
-  // -------------------- STATE & CONSTANTS -----------------------------------
-  // Timings (ms)
-  const FRAME_MS = 20; // Twilio sends ~20ms frames at 8kHz
-  const ECHO_MUTE_WINDOW_MS = 600; // ignore inbound right after we start speaking (echo guard)
-  const BARGE_MIN_SPEECH_MS = 320; // sustained caller speech to count as interruption
-  const EOS_SILENCE_MS = 450; // end-of-speech silence to commit
-  const MAX_UTTERANCE_MS = 4000; // force commit if long monologue
-  const MIN_COMMIT_BYTES = 1600; // also gate on bytes (~>100ms of µ-law)
-
-  // VAD
-  const vad = new AdaptiveVad({ minRms: 800, noiseLearnFrames: 100, boost: 3.8 });
-
-  // Flags
+  // Twilio state
   let twilioReady = false;
   let streamSid = null;
 
-  // Speaking / listening state
-  let isSpeaking = false; // we are currently playing TTS to caller
-  let awaitingCancel = false; // cancel in-flight
-  let awaitingResponse = false; // model response in flight
-  let greetingInFlight = false; // first turn
-
-  // Scheduler counters
-  let lastOutboundTs = 0; // last time we sent any TTS audio to Twilio
-  let echoMuteUntil = 0; // absolute time until which inbound frames are discarded (echo)
-  let collecting = false; // currently collecting a caller utterance
-  let collectedMs = 0; // collected speech duration
-  let collectedBytes = 0; // for safety gating
-  let silenceMs = 0; // silence stretch after speech
-  let totalSinceLastCommitMs = 0;
-
-  // Twilio media buffering (only used until streamSid available)
-  const pendingAudioOut = [];
-
-  // Heartbeat (keeps WS from idling)
-  const heartbeat = setInterval(() => {
-    try {
-      if (twilioWS.readyState === WebSocket.OPEN) twilioWS.ping();
-      if (openaiWS.readyState === WebSocket.OPEN) openaiWS.ping();
-    } catch {}
-  }, 15000);
-
-  const safeSendTwilio = (obj) => {
-    if (!obj) return;
-    if (!twilioReady || !streamSid) {
-      if (obj.event === "media") pendingAudioOut.push(obj);
-      return;
-    }
-    if (obj.event === "media" && !obj.streamSid) obj.streamSid = streamSid;
-    if (twilioWS.readyState === WebSocket.OPEN) {
-      try {
-        twilioWS.send(JSON.stringify(obj));
-      } catch (e) {
-        console.error("[Twilio send error]", e);
-      }
-    }
-  };
-  const flushPendingTwilio = () => {
-    while (pendingAudioOut.length && twilioWS.readyState === WebSocket.OPEN) {
-      const frame = pendingAudioOut.shift();
-      safeSendTwilio(frame);
-    }
-  };
-
-  // ---------------------- OPENAI REALTIME SOCKET ----------------------------
+  // OpenAI WS
   const openaiWS = new WebSocket(
     `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
       OPENAI_REALTIME_MODEL
@@ -207,6 +147,19 @@ wss.on("connection", (twilioWS) => {
       },
     }
   );
+
+  // Send helpers
+  const safeSendTwilio = (msgObj) => {
+    if (!twilioReady || !streamSid) return;
+    if (msgObj?.event === "media" && !msgObj.streamSid) msgObj.streamSid = streamSid;
+    if (twilioWS.readyState === WebSocket.OPEN) {
+      try {
+        twilioWS.send(JSON.stringify(msgObj));
+      } catch (err) {
+        console.error("[Twilio send error]", err);
+      }
+    }
+  };
 
   const openaiOutbox = [];
   const safeSendOpenAI = (obj) => {
@@ -222,159 +175,164 @@ wss.on("connection", (twilioWS) => {
     }
   };
 
+  // ---- Turn & VAD state machine ----
+  let isAssistantSpeaking = false;
+  let awaitingResponse = false; // a response.create is in flight
+  let userSpeechActive = false;
+  let userSpeechMs = 0;
+  let silenceMs = 0;
+  let turnMs = 0;
+
+  let collectedBytes = 0; // for commit size debug only
+  let capturedFrames = []; // store base64 frames for this user turn
+
+  function resetUserCapture() {
+    userSpeechActive = false;
+    userSpeechMs = 0;
+    silenceMs = 0;
+    turnMs = 0;
+    collectedBytes = 0;
+    capturedFrames = [];
+  }
+
+  function appendUserAudio(b64) {
+    // Compute RMS for VAD
+    const level = rmsOfMuLawBase64(b64);
+
+    // Decide state transition
+    if (!userSpeechActive) {
+      if (level >= VAD.RMS_START) {
+        userSpeechActive = true;
+        userSpeechMs = VAD.FRAME_MS;
+        silenceMs = 0;
+      } else {
+        // still idle/noise; do not store audio
+        return;
+      }
+    } else {
+      // already in speech
+      if (level >= VAD.RMS_CONTINUE) {
+        userSpeechMs += VAD.FRAME_MS;
+        silenceMs = 0;
+      } else {
+        // below continue threshold, count as silence
+        silenceMs += VAD.FRAME_MS;
+      }
+    }
+
+    // If we're actively capturing, store the frame (even if it's low-level, once in speech)
+    capturedFrames.push(b64);
+    collectedBytes += Buffer.from(b64, "base64").length;
+    turnMs += VAD.FRAME_MS;
+
+    // Barge-in: only if assistant is speaking AND we've confirmed speech ≥ BARGE_IN_MIN_MS
+    if (
+      isAssistantSpeaking &&
+      userSpeechMs >= VAD.BARGE_IN_MIN_MS &&
+      !awaitingResponse
+    ) {
+      console.log("[BARGE-IN] Canceling assistant due to user speech");
+      safeSendOpenAI({ type: "response.cancel" });
+      isAssistantSpeaking = false;
+    }
+
+    // End-of-utterance?
+    const utteranceLongEnough = userSpeechMs >= VAD.MIN_SPEECH_MS;
+    const endedBySilence = silenceMs >= VAD.END_SILENCE_MS;
+    const endedByTimeout = turnMs >= VAD.MAX_TURN_DURATION_MS;
+
+    if ((utteranceLongEnough && endedBySilence) || endedByTimeout) {
+      // Build a single base64 by concatenation (OpenAI accepts incremental appends;
+      // we’ll just append frames then commit once)
+      for (const f of capturedFrames) {
+        safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
+      }
+      safeSendOpenAI({ type: "input_audio_buffer.commit" });
+
+      // Create assistant response (audio + text)
+      awaitingResponse = true;
+      console.log(
+        `[TURN] committing: ${capturedFrames.length} frames, ${collectedBytes} bytes`
+      );
+      safeSendOpenAI({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          conversation: "auto",
+        },
+      });
+
+      // Clear capture for next turn
+      resetUserCapture();
+    }
+  }
+
+  // ---------- OpenAI socket ----------
   openaiWS.on("open", () => {
     console.log("[OpenAI] WS open");
-    // We implement our own end-of-speech detection; leave turn_detection off.
+    // Configure to be *reactive only*; we do our own VAD and turn-taking.
     safeSendOpenAI({
       type: "session.update",
       session: {
         modalities: ["text", "audio"],
         voice: "alloy",
-        output_audio_format: "g711_ulaw",
-        input_audio_format: "g711_ulaw",
-        // no turn_detection — we control commit explicitly
-        instructions:
-          "You are Barber AI. Speak in concise US English. Do not interrupt. If the caller interrupts, stop and listen.",
+        output_audio_format: "g711_ulaw", // matches Twilio playback
+        input_audio_format: "g711_ulaw", // we send μ-law to the buffer
+        // IMPORTANT: no server VAD; we control commits.
+        instructions: INSTRUCTIONS,
       },
     });
-    while (openaiOutbox.length) {
-      openaiWS.send(openaiOutbox.shift());
-    }
+
+    // flush queued messages if any
+    while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
   });
 
-  // ----------------------- FSM HELPERS --------------------------------------
-  function onTtsStart() {
-    isSpeaking = true;
-    lastOutboundTs = Date.now();
-    echoMuteUntil = lastOutboundTs + ECHO_MUTE_WINDOW_MS; // echo guard window
-  }
-  function onTtsStop() {
-    isSpeaking = false;
-    awaitingCancel = false;
-    // leave echoMuteUntil as-is; VAD will ignore if time has passed
-  }
-
-  function startCollecting() {
-    collecting = true;
-    collectedMs = 0;
-    collectedBytes = 0;
-    silenceMs = 0;
-    totalSinceLastCommitMs = 0;
-  }
-  function stopCollecting() {
-    collecting = false;
-    collectedMs = 0;
-    collectedBytes = 0;
-    silenceMs = 0;
-  }
-
-  function commitAndAsk() {
-    // Finalize the current audio buffer and ask for a response
-    safeSendOpenAI({ type: "input_audio_buffer.commit" });
-    safeSendOpenAI({
-      type: "response.create",
-      response: { modalities: ["audio", "text"], conversation: "auto" },
-    });
-    awaitingResponse = true;
-    stopCollecting();
-  }
-
-  function handleBargeIn() {
-    if (isSpeaking && awaitingResponse && !awaitingCancel) {
-      // True human barge-in — cancel TTS immediately
-      safeSendOpenAI({ type: "response.cancel" });
-      awaitingCancel = true;
-    }
-    // We also begin collecting the caller speech (frames already being appended)
-    if (!collecting) startCollecting();
-  }
-
-  // ------------------ OPENAI -> TWILIO (OUTBOUND AUDIO) ---------------------
   openaiWS.on("message", (data) => {
+    let msg;
     try {
-      const msg = JSON.parse(data.toString());
-      switch (msg.type) {
-        case "response.output_audio.delta":
-        case "response.audio.delta": {
-          const payload = msg.delta || msg.audio; // base64 G.711 μ-law
-          if (payload) {
-            onTtsStart();
-            safeSendTwilio({ event: "media", media: { payload } });
-            if (streamSid) {
-              safeSendTwilio({
-                event: "mark",
-                streamSid,
-                mark: { name: "chunk" },
-              });
-            }
-          }
-          break;
-        }
-        case "response.audio.done": {
-          onTtsStop();
-          break;
-        }
-        case "response.canceled": {
-          onTtsStop();
-          break;
-        }
-        case "response.done": {
-          onTtsStop();
-          awaitingResponse = false;
-          if (greetingInFlight) {
-            greetingInFlight = false;
-            console.log("[State] greeting done");
-          }
-          break;
-        }
-        case "error": {
-          console.error("[OpenAI ERROR]", msg);
-          break;
-        }
-        default: {
-          // Throttle logs: show interesting events only
-          if (!String(msg.type).includes("rate_limits"))
-            console.log("[OpenAI EVENT]", msg.type);
-        }
-      }
-    } catch (e) {
-      console.error("OpenAI message parse error", e);
+      msg = JSON.parse(data.toString());
+    } catch {
+      console.error("[OpenAI] parse error");
+      return;
+    }
+
+    // Log selectively
+    if (!["response.output_audio.delta", "response.audio.delta"].includes(msg.type)) {
+      console.log("[OpenAI EVENT]", msg.type);
+    }
+
+    if (msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") {
+      // Assistant is speaking → stream to Twilio
+      isAssistantSpeaking = true;
+      const payload = msg.audio || msg.delta; // base64 μ-law
+      safeSendTwilio({ event: "media", media: { payload } });
+    } else if (msg.type === "response.audio.done") {
+      isAssistantSpeaking = false;
+    } else if (msg.type === "response.done") {
+      isAssistantSpeaking = false;
+      awaitingResponse = false;
+      // ensure we clear the model input buffer after each turn (defensive)
+      safeSendOpenAI({ type: "input_audio_buffer.clear" });
+    } else if (msg.type === "error") {
+      console.error("[OpenAI ERROR]", msg);
     }
   });
 
-  // ------------------ TWILIO -> OPENAI (INBOUND AUDIO) ----------------------
+  // ---------- Twilio inbound ----------
   twilioWS.on("message", (raw) => {
     let msg;
     try {
       msg = JSON.parse(raw.toString());
-    } catch {
-      // Sometimes toolchains inject noise; ignore non-JSON frames.
+    } catch (e) {
+      console.error("Twilio message parse error", e);
       return;
     }
 
     if (msg.event === "start") {
-      console.log(
-        "[Twilio] stream start:",
-        msg.start.streamSid,
-        "tracks:",
-        msg.start.tracks
-      );
       streamSid = msg.start.streamSid;
       twilioReady = true;
-      flushPendingTwilio();
-
-      // Initial greeting (one-time)
-      greetingInFlight = true;
-      awaitingResponse = true;
-      safeSendOpenAI({
-        type: "response.create",
-        response: {
-          instructions:
-            "Say exactly: 'Hello from Barber AI. If you can hear this, the OpenAI link works.'",
-          modalities: ["audio", "text"],
-          conversation: "none",
-        },
-      });
+      console.log("[Twilio] stream started", streamSid, "tracks:", msg.start.tracks);
+      resetUserCapture();
       return;
     }
 
@@ -382,113 +340,41 @@ wss.on("connection", (twilioWS) => {
       const b64 = msg.media?.payload;
       if (!b64) return;
 
-      // 1) Compute energy & update VAD/noise
-      const now = Date.now();
-      const rms = ulawBase64Rms(b64);
-
-      // Considered silent for learning if very low RMS and not in speaking echo window
-      const inEchoWindow = now < echoMuteUntil;
-      const consideredSilent = rms < 400; // tiny baseline for learning
-      vad.observe(rms, consideredSilent && !inEchoWindow);
-
-      const speechy = vad.isSpeech(rms);
-
-      // 2) Decide whether to treat as barge-in or discard as echo
-      if (isSpeaking) {
-        // If we're talking, ignore frames during echo mute window unless strong sustained speech appears
-        if (inEchoWindow) {
-          // DROP: do not append
-          return;
-        }
-
-        // Outside mute window: only count as barge-in if sustained speech
-        // We implement a tiny accumulator by toggling collecting based on speechy
-        if (speechy) {
-          if (!collecting) startCollecting();
-          collectedMs += FRAME_MS;
-          if (collectedMs >= BARGE_MIN_SPEECH_MS) {
-            handleBargeIn(); // will cancel TTS
-          }
-        } else {
-          // brief non-speech resets small accumulator
-          if (collecting) {
-            collectedMs = Math.max(0, collectedMs - 2 * FRAME_MS);
-          }
-        }
-
-        // Do NOT forward frames to OpenAI while we are speaking until barge-in confirmed (collecting long enough)
-        if (!(collecting && collectedMs >= BARGE_MIN_SPEECH_MS)) {
-          return; // drop likely echo / short spurts
-        }
-      }
-
-      // 3) We are either not speaking, or barge-in is confirmed — append audio
-      safeSendOpenAI({ type: "input_audio_buffer.append", audio: b64 });
-
-      // mark collecting state & track totals
-      if (!collecting) startCollecting();
-      collectedBytes += Buffer.from(b64, "base64").length;
-      totalSinceLastCommitMs += FRAME_MS;
-
-      // 4) End-of-speech detection (silence stretch)
-      if (speechy) {
-        silenceMs = 0;
-      } else {
-        silenceMs += FRAME_MS;
-      }
-
-      const longEnough =
-        collectedBytes >= MIN_COMMIT_BYTES ||
-        collectedMs >= (BARGE_MIN_SPEECH_MS + 80);
-
-      const hitEos = longEnough && silenceMs >= EOS_SILENCE_MS;
-      const hitMax = totalSinceLastCommitMs >= MAX_UTTERANCE_MS;
-
-      if (hitEos || hitMax) {
-        commitAndAsk();
-      }
-
+      // While assistant is speaking, we still collect audio for barge-in detection.
+      // But we will NOT start a new response while `awaitingResponse` is true.
+      appendUserAudio(b64);
       return;
     }
 
-    if (msg.event === "mark") {
-      // debugging
-      // console.log("[Twilio] mark:", msg?.mark?.name);
-      return;
-    }
+    if (msg.event === "mark") return;
 
     if (msg.event === "stop") {
       console.log("[Twilio] stop");
-      cleanupAndClose();
+      safeClose(openaiWS);
+      safeClose(twilioWS);
       return;
     }
   });
 
-  // --------------------------- CLEANUP --------------------------------------
-  function cleanupAndClose() {
-    clearInterval(heartbeat);
-    try {
-      if (openaiWS.readyState === WebSocket.OPEN) openaiWS.close();
-    } catch {}
-    try {
-      if (twilioWS.readyState === WebSocket.OPEN) twilioWS.close();
-    } catch {}
-  }
-
+  // ---------- Closures & errors ----------
   twilioWS.on("close", () => {
     console.log("[Twilio] closed");
-    cleanupAndClose();
+    safeClose(openaiWS);
   });
   openaiWS.on("close", () => {
     console.log("[OpenAI] closed");
-    cleanupAndClose();
+    safeClose(twilioWS);
   });
-
   twilioWS.on("error", (e) => console.error("[Twilio WS error]", e));
   openaiWS.on("error", (e) => console.error("[OpenAI WS error]", e));
 });
 
-// --------------------------- BOOT -------------------------------------------
 server.listen(PORT, () => {
-  console.log(`Advanced WS server ready at http://0.0.0.0:${PORT}`);
+  console.log(`Minimal WS server ready at http://0.0.0.0:${PORT}`);
 });
+
+function safeClose(ws) {
+  try {
+    if (ws && ws.readyState === WebSocket.OPEN) ws.close();
+  } catch {}
+}
