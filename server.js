@@ -591,30 +591,25 @@ wss.on("connection", (twilioWS) => {
       return;
     }
 
-    if (msg.event === "start") {
+        if (msg.event === "start") {
       streamSid = msg.start.streamSid;
       twilioReady = true;
       console.log("[Twilio] stream started", streamSid, "tracks:", msg.start.tracks);
+    
+      // reset your VAD capture for a fresh call
       resetUserCapture();
-      return;
-    }
-
-    if (msg.event === "media") {
-      const b64 = msg.media?.payload;
-      if (!b64) return;
-
-      // While assistant is speaking, we still collect audio for barge-in detection.
-      // But we will NOT start a new response while `awaitingResponse` is true.
-      appendUserAudio(b64);
-      return;
-    }
-
-    if (msg.event === "mark") return;
-
-    if (msg.event === "stop") {
-      console.log("[Twilio] stop");
-      safeClose(openaiWS);
-      safeClose(twilioWS);
+    
+      // One-time deterministic greeting from the AI (not Twilio <Say/>)
+      safeSendOpenAI({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          conversation: "none", // don't use prior convo state; ensures consistency
+          // Use EXACT phrasing; this overrides session instructions for this reply
+          instructions: "Say exactly: 'Hello, thank you for calling the barbershop! How can I help you today.'"
+        },
+      });
+      awaitingResponse = true; // prevent overlapping response.create while greeting plays
       return;
     }
   });
