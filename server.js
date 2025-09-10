@@ -27,28 +27,87 @@ process.on("uncaughtException", (err) => console.error("[Uncaught]", err));
 process.on("unhandledRejection", (err) => console.error("[Unhandled]", err));
 
 // ---------- HTTP server (TwiML + health) ----------
-const server = http.createServer((req, res) => {
-  if (req.url === "/voice") {
-    // Stream *inbound* audio only. We synthesize to Twilio via media frames we send back.
-    // No <Say> to avoid speaking before we’re ready.
-    const twiml = `
-      <Response>
-        <Connect>
-          <Stream url="${BASE_URL.replace(/^https?/, "wss")}/media" track="inbound_track"/>
-        </Connect>
-      </Response>
-    `.trim();
+const server = http.createServer(async (req, res) => {
+  try {
+    // Parse URL & query safely (BASE_URL already defined in your file)
+    const fullUrl = new URL(req.url, BASE_URL);
+    const path = fullUrl.pathname;
 
-    res.writeHead(200, { "Content-Type": "text/xml" });
-    return res.end(twiml);
+    // === Twilio voice (unchanged) ===
+    if (path === "/voice") {
+      const twiml = `
+        <Response>
+          <Connect>
+            <Stream url="${BASE_URL.replace(/^https?/, "wss")}/media" track="inbound_track"/>
+          </Connect>
+        </Response>
+      `.trim();
+
+      res.writeHead(200, { "Content-Type": "text/xml" });
+      return res.end(twiml);
+    }
+
+    // === Google OAuth kick-off ===
+    if (path === "/auth/google") {
+      const url = getAuthUrl();
+      res.writeHead(302, { Location: url });
+      return res.end();
+    }
+
+    // === Google OAuth callback ===
+    if (path === "/oauth2callback") {
+      const code = fullUrl.searchParams.get("code");
+      if (!code) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        return res.end("Missing ?code");
+      }
+      await handleOAuthCallback(code);
+      res.writeHead(200, { "Content-Type": "text/html" });
+      return res.end(`<h3>Google connected ✅</h3><p>You can close this tab.</p>`);
+    }
+
+    // === Quick sanity checks ===
+    if (path === "/gcal/me") {
+      const info = await whoAmI();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify(info, null, 2));
+    }
+
+    if (path === "/gcal/today") {
+      const items = await listEventsToday();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify(items, null, 2));
+    }
+
+    // === (Optional) quick-create test endpoint ===
+    // /gcal/create?summary=Test&start=2025-09-10T15:00:00-04:00&end=2025-09-10T15:30:00-04:00
+    if (path === "/gcal/create") {
+      const summary = fullUrl.searchParams.get("summary") || "Untitled";
+      const start = fullUrl.searchParams.get("start");
+      const end = fullUrl.searchParams.get("end");
+      const attendees = (fullUrl.searchParams.get("attendees") || "")
+        .split(",")
+        .map(s => s.trim())
+        .filter(Boolean);
+
+      if (!start || !end) {
+        res.writeHead(400, { "Content-Type": "text/plain" });
+        return res.end("Provide start and end ISO strings");
+      }
+
+      const event = await createEvent({ summary, start, end, attendees });
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify(event, null, 2));
+    }
+
+    // === Default health check ===
+    res.writeHead(200, { "Content-Type": "text/plain" });
+    res.end("Barber AI Realtime bridge is alive.\n");
+  } catch (err) {
+    console.error("[HTTP error]", err);
+    res.writeHead(500, { "Content-Type": "text/plain" });
+    res.end("Server error");
   }
-
-  res.writeHead(200, { "Content-Type": "text/plain" });
-  res.end("Barber AI Realtime bridge is alive.\n");
-});
-
-server.on("request", (req) => {
-  console.log("[HTTP]", req.method, req.url, "ua=", req.headers["user-agent"]);
 });
 
 // ---------- WS upgrade ----------
