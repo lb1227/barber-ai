@@ -34,11 +34,9 @@ process.on("unhandledRejection", (err) => console.error("[Unhandled]", err));
 // ---------- HTTP server (TwiML + health) ----------
 const server = http.createServer(async (req, res) => {
   try {
-    // Parse URL & query safely (BASE_URL already defined in your file)
     const fullUrl = new URL(req.url, BASE_URL);
     const path = fullUrl.pathname;
 
-    // === Twilio voice (unchanged) ===
     if (path === "/voice") {
       const twiml = `
         <Response>
@@ -52,14 +50,12 @@ const server = http.createServer(async (req, res) => {
       return res.end(twiml);
     }
 
-    // === Google OAuth kick-off ===
     if (path === "/auth/google") {
       const url = getAuthUrl();
       res.writeHead(302, { Location: url });
       return res.end();
     }
 
-    // === Google OAuth callback ===
     if (path === "/oauth2callback") {
       const code = fullUrl.searchParams.get("code");
       if (!code) {
@@ -71,7 +67,6 @@ const server = http.createServer(async (req, res) => {
       return res.end(`<h3>Google connected ✅</h3><p>You can close this tab.</p>`);
     }
 
-    // === Quick sanity checks ===
     if (path === "/gcal/me") {
       const info = await whoAmI();
       res.writeHead(200, { "Content-Type": "application/json" });
@@ -84,8 +79,6 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify(items, null, 2));
     }
 
-    // === (Optional) quick-create test endpoint ===
-    // /gcal/create?summary=Test&start=2025-09-10T15:00:00-04:00&end=2025-09-10T15:30:00-04:00
     if (path === "/gcal/create") {
       const summary = fullUrl.searchParams.get("summary") || "Untitled";
       const start = fullUrl.searchParams.get("start");
@@ -112,7 +105,6 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify(event, null, 2));
     }
 
-    // === Default health check ===
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("Barber AI Realtime bridge is alive.\n");
   } catch (err) {
@@ -145,14 +137,12 @@ server.on("upgrade", (req, socket, head) => {
 
 // ---------- Helpers: μ-law decode + RMS ----------
 function muLawByteToPcm16(u) {
-  // μ-law decode (G.711) – returns int16
-  // Source logic adapted from common G711 tables (no external deps).
   u = ~u & 0xff;
   const sign = u & 0x80;
   let exponent = (u >> 4) & 0x07;
   let mantissa = u & 0x0f;
   let sample = ((mantissa << 4) + 0x08) << (exponent + 3);
-  sample -= 0x84; // bias
+  sample -= 0x84;
   return sign ? -sample : sample;
 }
 
@@ -162,7 +152,6 @@ function rmsOfMuLawBase64(b64) {
     const len = buf.length;
     if (!len) return 0;
     let sumSq = 0;
-    // Sample μ-law bytes sparsely if very large to save CPU
     const stride = len > 3200 ? Math.floor(len / 1600) : 1;
     let count = 0;
     for (let i = 0; i < len; i += stride) {
@@ -171,7 +160,6 @@ function rmsOfMuLawBase64(b64) {
       count++;
     }
     const meanSq = sumSq / Math.max(1, count);
-    // Normalize to ~0..1 from int16
     return Math.sqrt(meanSq) / 32768;
   } catch {
     return 0;
@@ -180,17 +168,13 @@ function rmsOfMuLawBase64(b64) {
 
 // ---------- Conversation policies (tunable) ----------
 const VAD = {
-  // Audio sampled at 8kHz in G.711 μ-law
-  FRAME_MS: 20, // Twilio sends ~20ms media frames
-  // Speech detection:
-  RMS_START: 0.02, // start speaking threshold (~-34 dBFS)
-  RMS_CONTINUE: 0.015, // keep speaking threshold
-  MIN_SPEECH_MS: 80, // require at least this much speech before we consider it a user turn
-  END_SILENCE_MS: 1000, // end of utterance silence
-  // Barge-in:
-  BARGE_IN_MIN_MS: 75, // must detect this much speech before canceling assistant
-  // Idle:
-  MAX_TURN_DURATION_MS: 6000, // fallback end to avoid never-ending capture
+  FRAME_MS: 20,
+  RMS_START: 0.02,
+  RMS_CONTINUE: 0.015,
+  MIN_SPEECH_MS: 80,
+  END_SILENCE_MS: 1000,
+  BARGE_IN_MIN_MS: 75,
+  MAX_TURN_DURATION_MS: 6000,
 };
 
 const INSTRUCTIONS =
@@ -252,16 +236,16 @@ wss.on("connection", (twilioWS) => {
 
   // ---- Turn & VAD state machine ----
   let isAssistantSpeaking = false;
-  let awaitingResponse = false; // a response.create is in flight
+  let awaitingResponse = false;
   let userSpeechActive = false;
   let userSpeechMs = 0;
   let silenceMs = 0;
   let turnMs = 0;
 
-  let collectedBytes = 0; // for commit size debug only
-  let capturedFrames = []; // store base64 frames for this user turn
-  let queuedFrames = [];   // NEW
-  let queuedBytes = 0;     // NEW
+  let collectedBytes = 0;
+  let capturedFrames = [];
+  let queuedFrames = [];
+  let queuedBytes = 0;
 
   function resetUserCapture() {
     userSpeechActive = false;
@@ -273,145 +257,124 @@ wss.on("connection", (twilioWS) => {
   }
 
   function appendUserAudio(b64) {
-    // Compute RMS for VAD
     const level = rmsOfMuLawBase64(b64);
 
-    // Decide state transition
     if (!userSpeechActive) {
       if (level >= VAD.RMS_START) {
         userSpeechActive = true;
         userSpeechMs = VAD.FRAME_MS;
         silenceMs = 0;
       } else {
-        // still idle/noise; do not store audio
         return;
       }
     } else {
-      // already in speech
       if (level >= VAD.RMS_CONTINUE) {
         userSpeechMs += VAD.FRAME_MS;
         silenceMs = 0;
       } else {
-        // below continue threshold, count as silence
         silenceMs += VAD.FRAME_MS;
       }
     }
 
-    // If we're actively capturing, store the frame (even if it's low-level, once in speech)
     capturedFrames.push(b64);
     collectedBytes += Buffer.from(b64, "base64").length;
     turnMs += VAD.FRAME_MS;
 
-    // Barge-in: only if assistant is speaking AND we've confirmed speech ≥ BARGE_IN_MIN_MS
-    if (
-      isAssistantSpeaking &&
-      userSpeechMs >= VAD.BARGE_IN_MIN_MS &&
-      !awaitingResponse
-    ) {
+    if (isAssistantSpeaking && userSpeechMs >= VAD.BARGE_IN_MIN_MS && !awaitingResponse) {
       console.log("[BARGE-IN] Canceling assistant due to user speech");
       safeSendOpenAI({ type: "response.cancel" });
       isAssistantSpeaking = false;
     }
 
-    // End-of-utterance?
     const utteranceLongEnough = userSpeechMs >= VAD.MIN_SPEECH_MS;
     const endedBySilence = silenceMs >= VAD.END_SILENCE_MS;
     const endedByTimeout = turnMs >= VAD.MAX_TURN_DURATION_MS;
 
     if ((utteranceLongEnough && endedBySilence) || endedByTimeout) {
-      // Build a single base64 by concatenation (OpenAI accepts incremental appends;
-      // we’ll just append frames then commit once)
-     // Guard: only commit if we have ≥100ms (5 frames × 20ms)
-    if (capturedFrames.length < 5) {
-      // too short—probably noise/breath; ignore
+      if (capturedFrames.length < 5) {
+        resetUserCapture();
+        return;
+      }
+
+      if (awaitingResponse) {
+        queuedFrames = capturedFrames.slice();
+        queuedBytes = collectedBytes;
+        resetUserCapture();
+        return;
+      }
+
+      for (const f of capturedFrames) {
+        safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
+      }
+      safeSendOpenAI({ type: "input_audio_buffer.commit" });
+
+      awaitingResponse = true;
+      console.log(`[TURN] committing: ${capturedFrames.length} frames, ${collectedBytes} bytes`);
+      safeSendOpenAI({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          conversation: "auto",
+          instructions:
+            "If the caller requested a booking and details are complete, call book_appointment; " +
+            "otherwise ask concise follow-ups. Keep it brief and in American English.",
+        },
+      });
       resetUserCapture();
-      return;
-    }
-    
-    // Also: don’t start a new reply if one’s in flight
-    if (awaitingResponse) {
-      // NEW: queue this finished utterance to process right after the active response
-      queuedFrames = capturedFrames.slice();
-      queuedBytes = collectedBytes;
-      resetUserCapture();
-      return;
-    }
-    
-    for (const f of capturedFrames) {
-      safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
-    }
-    safeSendOpenAI({ type: "input_audio_buffer.commit" });
-    
-    // Ask the model to respond (and call tools if needed)
-    awaitingResponse = true;
-    console.log(`[TURN] committing: ${capturedFrames.length} frames, ${collectedBytes} bytes`);
-    safeSendOpenAI({
-      type: "response.create",
-      response: {
-        modalities: ["audio", "text"],
-        conversation: "auto",
-        instructions:
-          "If the caller requested a booking and details are complete, call book_appointment; " +
-          "otherwise ask concise follow-ups. Keep it brief and in American English.",
-      },
-    });
-    resetUserCapture();
     }
   }
 
   async function handleBookAppointment(args) {
-  // Basic validation & shaping
-  const {
-    customer_name,
-    phone,
-    service,
-    start_iso,
-    duration_min = 30,
-    notes = "",
-    attendees = [],
-  } = args || {};
+    const {
+      customer_name,
+      phone,
+      service,
+      start_iso,
+      duration_min = 30,
+      notes = "",
+      attendees = [],
+    } = args || {};
 
-  if (!customer_name || !service || !start_iso || !duration_min) {
-    return { ok: false, error: "Missing required fields." };
+    if (!customer_name || !service || !start_iso || !duration_min) {
+      return { ok: false, error: "Missing required fields." };
+    }
+
+    const start = new Date(start_iso);
+    if (isNaN(start.getTime())) {
+      return { ok: false, error: "Invalid start time." };
+    }
+    const end = new Date(start.getTime() + duration_min * 60 * 1000);
+
+    const summary = `${service} — ${customer_name}`;
+    const description =
+      `Booked by phone receptionist.\n` +
+      (phone ? `Phone: ${phone}\n` : "") +
+      (notes ? `Notes: ${notes}\n` : "");
+
+    try {
+      const ev = await createEvent({
+        summary,
+        start: start.toISOString(),
+        end: end.toISOString(),
+        attendees,
+        description,
+      });
+      return {
+        ok: true,
+        id: ev.id,
+        htmlLink: ev.htmlLink,
+        start: ev.start?.dateTime,
+        end: ev.end?.dateTime,
+        summary: ev.summary,
+      };
+    } catch (e) {
+      return { ok: false, error: e?.message || "Calendar error" };
+    }
   }
-
-  const start = new Date(start_iso);
-  if (isNaN(start.getTime())) {
-    return { ok: false, error: "Invalid start time." };
-  }
-  const end = new Date(start.getTime() + duration_min * 60 * 1000);
-
-  const summary = `${service} — ${customer_name}`;
-  const description =
-    `Booked by phone receptionist.\n` +
-    (phone ? `Phone: ${phone}\n` : "") +
-    (notes ? `Notes: ${notes}\n` : "");
-
-  try {
-    const ev = await createEvent({
-      summary,
-      start: start.toISOString(),
-      end: end.toISOString(),
-      attendees,
-      description,
-    });
-    return {
-      ok: true,
-      id: ev.id,
-      htmlLink: ev.htmlLink,
-      start: ev.start?.dateTime,
-      end: ev.end?.dateTime,
-      summary: ev.summary,
-    };
-  } catch (e) {
-    return { ok: false, error: e?.message || "Calendar error" };
-  }
-}
 
   // ---------- OpenAI socket ----------
   openaiWS.on("open", () => {
     console.log("[OpenAI] WS open");
-    // Configure to be *reactive only*; we do our own VAD and turn-taking.
     safeSendOpenAI({
       type: "session.update",
       session: {
@@ -419,15 +382,12 @@ wss.on("connection", (twilioWS) => {
         voice: "alloy",
         output_audio_format: "g711_ulaw",
         input_audio_format: "g711_ulaw",
-    
-        // Expose the booking tool to the model:
         tools: [
           {
             type: "function",
             name: "book_appointment",
             description:
-              "Create a Google Calendar event for a haircut/barber service. " +
-              "Ask for any missing details before calling this.",
+              "Create a Google Calendar event for a haircut/barber service. Ask for any missing details before calling this.",
             parameters: {
               type: "object",
               properties: {
@@ -456,14 +416,10 @@ wss.on("connection", (twilioWS) => {
           },
         ],
         tool_choice: "auto",
-    
-        // No server VAD; we control turns. Also behavior rules:
         instructions: INSTRUCTIONS,
       },
     });
 
-
-    // flush queued messages if any
     while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
   });
 
@@ -475,16 +431,14 @@ wss.on("connection", (twilioWS) => {
       console.error("[OpenAI] parse error");
       return;
     }
-  
-    // Log selectively
+
     if (!["response.output_audio.delta", "response.audio.delta"].includes(msg.type)) {
       console.log("[OpenAI EVENT]", msg.type);
     }
-  
-    // ====== AUDIO STREAMING ======
+
     if (msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") {
       isAssistantSpeaking = true;
-      const payload = msg.audio || msg.delta; // base64 μ-law
+      const payload = msg.audio || msg.delta;
       safeSendTwilio({ event: "media", media: { payload } });
       return;
     }
@@ -496,7 +450,6 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
 
-      // NEW: if the caller finished speaking during the greeting (or any reply), handle it now
       if (queuedFrames.length) {
         for (const f of queuedFrames) {
           safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
@@ -506,7 +459,6 @@ wss.on("connection", (twilioWS) => {
         queuedFrames = [];
         queuedBytes = 0;
 
-        // ask the model to respond to that queued utterance
         awaitingResponse = true;
         safeSendOpenAI({
           type: "response.create",
@@ -517,10 +469,9 @@ wss.on("connection", (twilioWS) => {
               "If the caller requested a booking and details are complete, call book_appointment; otherwise ask concise follow-ups. Keep it brief and in American English.",
           },
         });
-        return; // don't clear buffer here—we just used it
+        return;
       }
 
-      // Only clear if we’re not currently capturing a user turn
       if (!userSpeechActive) {
         safeSendOpenAI({ type: "input_audio_buffer.clear" });
       }
@@ -530,36 +481,26 @@ wss.on("connection", (twilioWS) => {
       console.error("[OpenAI ERROR]", msg);
       return;
     }
-  
-    // ====== TOOL CALLS (handle all three shapes) ======
+
+    // --- tool call handling kept same as your version ---
     openaiWS._toolCalls = openaiWS._toolCalls || {};
-    
-    // A) Older "function_call" item shape
     if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
       const call = msg.item;
       const id = call.id;
       const name = call.name;
-      // seed storage
       openaiWS._toolCalls[id] = openaiWS._toolCalls[id] || { name, argsText: "" };
-      if (typeof call.arguments === "string") {
-        openaiWS._toolCalls[id].argsText += call.arguments;
-      }
+      if (typeof call.arguments === "string") openaiWS._toolCalls[id].argsText += call.arguments;
       return;
     }
-    
-    // B) Newer "response.tool_call.*" shape
     if (msg.type === "response.tool_call.created" || msg.type === "response.tool_call.delta") {
       const call = msg.tool_call || {};
       const id = call.id || msg.call_id;
       if (!id) return;
       const name = call.name;
       openaiWS._toolCalls[id] = openaiWS._toolCalls[id] || { name, argsText: "" };
-      if (typeof call.arguments === "string") {
-        openaiWS._toolCalls[id].argsText += call.arguments;
-      }
+      if (typeof call.arguments === "string") openaiWS._toolCalls[id].argsText += call.arguments;
       return;
     }
-    
     if (msg.type === "response.tool_call.completed") {
       const id = msg.tool_call?.id || msg.call_id;
       const entry = id ? openaiWS._toolCalls[id] : null;
@@ -579,25 +520,19 @@ wss.on("connection", (twilioWS) => {
       }
       return;
     }
-    
-    // C) Also handle the newest "response.function_call_arguments.*" shape
     if (msg.type === "response.function_call_arguments.delta") {
-      const id = msg.call_id || msg.item_id || msg.id; // the event carries a call identifier
+      const id = msg.call_id || msg.item_id || msg.id;
       const name = msg.name;
       if (!id) return;
       openaiWS._toolCalls[id] = openaiWS._toolCalls[id] || { name, argsText: "" };
-      if (typeof msg.delta === "string") {
-        openaiWS._toolCalls[id].argsText += msg.delta; // streamed JSON chunk
-      }
+      if (typeof msg.delta === "string") openaiWS._toolCalls[id].argsText += msg.delta;
       return;
     }
-    
     if (msg.type === "response.function_call_arguments.done") {
       const id = msg.call_id || msg.item_id || msg.id;
       const entry = id ? openaiWS._toolCalls[id] : null;
       if (!entry) return;
       const args = parseToolArgs(entry.argsText || "{}");
-
       if (entry.name === "book_appointment") {
         const result = await handleBookAppointment(args);
         safeSendOpenAI({
@@ -612,7 +547,7 @@ wss.on("connection", (twilioWS) => {
       }
       return;
     }
-  }); // <-- CLOSES openaiWS.on("message", ...)
+  });
 
   // ---------- Twilio inbound ----------
   twilioWS.on("message", (raw) => {
@@ -628,21 +563,36 @@ wss.on("connection", (twilioWS) => {
       streamSid = msg.start.streamSid;
       twilioReady = true;
       console.log("[Twilio] stream started", streamSid, "tracks:", msg.start.tracks);
-    
-      // reset your VAD capture for a fresh call
+
       resetUserCapture();
-    
-      // One-time deterministic greeting from the AI (not Twilio <Say/>)
+
+      // Deterministic greeting from AI
       safeSendOpenAI({
         type: "response.create",
         response: {
           modalities: ["audio", "text"],
-          conversation: "none", // don't use prior convo state; ensures consistency
-          // Use EXACT phrasing; this overrides session instructions for this reply
+          conversation: "none",
           instructions: "Say exactly: 'Hello, thank you for calling the barbershop! How can I help you today.'"
         },
       });
-      awaitingResponse = true; // prevent overlapping response.create while greeting plays
+      awaitingResponse = true;
+      return;
+    }
+
+    // 🔙 RESTORED: feed caller audio to VAD so the bot can hear
+    if (msg.event === "media") {
+      const b64 = msg.media?.payload;
+      if (!b64) return;
+      appendUserAudio(b64);
+      return;
+    }
+
+    if (msg.event === "mark") return;
+
+    if (msg.event === "stop") {
+      console.log("[Twilio] stop");
+      safeClose(openaiWS);
+      safeClose(twilioWS);
       return;
     }
   });
