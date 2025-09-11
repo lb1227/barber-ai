@@ -208,6 +208,8 @@ wss.on("connection", (twilioWS) => {
   // Twilio state
   let twilioReady = false;
   let streamSid = null;
+  // greet once per connection
+  let greeted = false;
 
   // OpenAI WS
   const openaiWS = new WebSocket(
@@ -405,7 +407,7 @@ wss.on("connection", (twilioWS) => {
 
   // ---------- OpenAI socket ----------
   openaiWS.on("open", () => {
-    console.log("[OpenAI] WS open");
+    console.log("[OpenAI] WS open]");
     // Configure to be *reactive only*; we do our own VAD and turn-taking.
     safeSendOpenAI({
       type: "session.update",
@@ -594,7 +596,7 @@ wss.on("connection", (twilioWS) => {
       return;
     }
 
-        if (msg.event === "start") {
+    if (msg.event === "start") {
       streamSid = msg.start.streamSid;
       twilioReady = true;
       console.log("[Twilio] stream started", streamSid, "tracks:", msg.start.tracks);
@@ -603,16 +605,19 @@ wss.on("connection", (twilioWS) => {
       resetUserCapture();
     
       // One-time deterministic greeting from the AI (not Twilio <Say/>)
-      safeSendOpenAI({
-        type: "response.create",
-        response: {
-          modalities: ["audio", "text"],
-          conversation: "none", // don't use prior convo state; ensures consistency
-          // Use EXACT phrasing; this overrides session instructions for this reply
-          instructions: "Say exactly: 'Hello, thank you for calling the barbershop! How can I help you today.'"
-        },
-      });
-      awaitingResponse = true; // prevent overlapping response.create while greeting plays
+      if (!greeted) {
+        safeSendOpenAI({
+          type: "response.create",
+          response: {
+            modalities: ["audio", "text"],
+            conversation: "none", // don't use prior convo state; ensures consistency
+            // Use EXACT phrasing; this overrides session instructions for this reply
+            instructions: "Say exactly: 'Hello, thank you for calling the barbershop! How can i help you today.'"
+          },
+        });
+        awaitingResponse = true; // prevent overlapping response.create while greeting plays
+        greeted = true;
+      }
       return;
     }
   });
