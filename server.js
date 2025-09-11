@@ -208,8 +208,6 @@ wss.on("connection", (twilioWS) => {
   // Twilio state
   let twilioReady = false;
   let streamSid = null;
-  // greet once per connection
-  let greeted = false;
 
   // OpenAI WS
   const openaiWS = new WebSocket(
@@ -262,6 +260,8 @@ wss.on("connection", (twilioWS) => {
 
   let collectedBytes = 0; // for commit size debug only
   let capturedFrames = []; // store base64 frames for this user turn
+  let queuedFrames = [];   // NEW
+  let queuedBytes = 0;     // NEW
 
   function resetUserCapture() {
     userSpeechActive = false;
@@ -330,6 +330,9 @@ wss.on("connection", (twilioWS) => {
     
     // Also: don’t start a new reply if one’s in flight
     if (awaitingResponse) {
+      // NEW: queue this finished utterance to process right after the active response
+      queuedFrames = capturedFrames.slice();
+      queuedBytes = collectedBytes;
       resetUserCapture();
       return;
     }
@@ -407,7 +410,7 @@ wss.on("connection", (twilioWS) => {
 
   // ---------- OpenAI socket ----------
   openaiWS.on("open", () => {
-    console.log("[OpenAI] WS open]");
+    console.log("[OpenAI] WS open");
     // Configure to be *reactive only*; we do our own VAD and turn-taking.
     safeSendOpenAI({
       type: "session.update",
@@ -489,9 +492,34 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       return;
     }
-      if (msg.type === "response.done") {
+    if (msg.type === "response.done") {
       isAssistantSpeaking = false;
       awaitingResponse = false;
+
+      // NEW: if the caller finished speaking during the greeting (or any reply), handle it now
+      if (queuedFrames.length) {
+        for (const f of queuedFrames) {
+          safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
+        }
+        safeSendOpenAI({ type: "input_audio_buffer.commit" });
+        console.log(`[TURN] committed queued utterance: ${queuedFrames.length} frames, ${queuedBytes} bytes`);
+        queuedFrames = [];
+        queuedBytes = 0;
+
+        // ask the model to respond to that queued utterance
+        awaitingResponse = true;
+        safeSendOpenAI({
+          type: "response.create",
+          response: {
+            modalities: ["audio", "text"],
+            conversation: "auto",
+            instructions:
+              "If the caller requested a booking and details are complete, call book_appointment; otherwise ask concise follow-ups. Keep it brief and in American English.",
+          },
+        });
+        return; // don't clear buffer here—we just used it
+      }
+
       // Only clear if we’re not currently capturing a user turn
       if (!userSpeechActive) {
         safeSendOpenAI({ type: "input_audio_buffer.clear" });
@@ -605,19 +633,16 @@ wss.on("connection", (twilioWS) => {
       resetUserCapture();
     
       // One-time deterministic greeting from the AI (not Twilio <Say/>)
-      if (!greeted) {
-        safeSendOpenAI({
-          type: "response.create",
-          response: {
-            modalities: ["audio", "text"],
-            conversation: "none", // don't use prior convo state; ensures consistency
-            // Use EXACT phrasing; this overrides session instructions for this reply
-            instructions: "Say exactly: 'Hello, thank you for calling the barbershop! How can i help you today.'"
-          },
-        });
-        awaitingResponse = true; // prevent overlapping response.create while greeting plays
-        greeted = true;
-      }
+      safeSendOpenAI({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          conversation: "none", // don't use prior convo state; ensures consistency
+          // Use EXACT phrasing; this overrides session instructions for this reply
+          instructions: "Say exactly: 'Hello, thank you for calling the barbershop! How can I help you today.'"
+        },
+      });
+      awaitingResponse = true; // prevent overlapping response.create while greeting plays
       return;
     }
   });
