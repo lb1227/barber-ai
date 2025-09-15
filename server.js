@@ -313,7 +313,7 @@ wss.on("connection", (twilioWS) => {
 
     // End-of-utterance?
     const utteranceLongEnough = userSpeechMs >= VAD.MIN_SPEECH_MS;
-    the const endedBySilence = silenceMs >= VAD.END_SILENCE_MS;
+    const endedBySilence = silenceMs >= VAD.END_SILENCE_MS; // <-- fixed line
     const endedByTimeout = turnMs >= VAD.MAX_TURN_DURATION_MS;
 
     if ((utteranceLongEnough && endedBySilence) || endedByTimeout) {
