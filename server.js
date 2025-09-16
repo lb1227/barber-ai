@@ -60,7 +60,7 @@ const server = http.createServer(async (req, res) => {
     }
 
     // === Google OAuth callback ===
-    if (path === "/oauth2callback" || path === "/gcal/oauth2callback") {
+    if (path === "/gcal/oauth2callback") {
       const code = fullUrl.searchParams.get("code");
       if (!code) {
         res.writeHead(400, { "Content-Type": "text/plain" });
@@ -313,7 +313,7 @@ wss.on("connection", (twilioWS) => {
 
     // End-of-utterance?
     const utteranceLongEnough = userSpeechMs >= VAD.MIN_SPEECH_MS;
-    const endedBySilence = silenceMs >= VAD.END_SILENCE_MS; // <-- fixed line
+    const endedBySilence = silenceMs >= VAD.END_SILENCE_MS;
     const endedByTimeout = turnMs >= VAD.MAX_TURN_DURATION_MS;
 
     if ((utteranceLongEnough && endedBySilence) || endedByTimeout) {
@@ -456,7 +456,7 @@ wss.on("connection", (twilioWS) => {
     try {
       msg = JSON.parse(data.toString());
     } catch {
-      console.error("[OpenAI] parse error]");
+      console.error("[OpenAI] parse error");
       return;
     }
   
@@ -611,7 +611,7 @@ wss.on("connection", (twilioWS) => {
     if (msg.event === "mark") return;
 
     if (msg.event === "stop") {
-      console.log("[Twilio] stop]");
+      console.log("[Twilio] stop");
       safeClose(openaiWS);
       safeClose(twilioWS);
       return;
@@ -620,11 +620,11 @@ wss.on("connection", (twilioWS) => {
 
   // ---------- Closures & errors ----------
   twilioWS.on("close", () => {
-    console.log("[Twilio] closed]");
+    console.log("[Twilio] closed");
     safeClose(openaiWS);
   });
   openaiWS.on("close", () => {
-    console.log("[OpenAI] closed]");
+    console.log("[OpenAI] closed");
     safeClose(twilioWS);
   });
   twilioWS.on("error", (e) => console.error("[Twilio WS error]", e));
