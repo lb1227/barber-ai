@@ -592,7 +592,7 @@ wss.on("connection", (twilioWS) => {
         type: "response.create",
         response: {
           modalities: ["audio", "text"],
-          conversation: "none", // don't use prior convo state; ensures consistency
+          conversation: "auto", // don't use prior convo state; ensures consistency
           // Use EXACT phrasing; this overrides session instructions for this reply
           instructions: "Say exactly: 'Hello, thank you for calling the barbershop! How can I help you today.'"
         },
