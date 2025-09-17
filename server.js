@@ -43,7 +43,7 @@ const server = http.createServer(async (req, res) => {
       const twiml = `
         <Response>
           <Connect>
-            <Stream url="${BASE_URL.replace(/^https?/, "wss")}/media" track="inbound_track"/>
+            <Stream url="${BASE_URL.replace(/^https?/, 'wss')}/media" track="both_tracks"/>
           </Connect>
         </Response>
       `.trim();
@@ -215,6 +215,7 @@ wss.on("connection", (twilioWS) => {
         Authorization: `Bearer ${OPENAI_API_KEY}`,
         "OpenAI-Beta": "realtime=v1",
         "x-openai-audio-output-format": "g711_ulaw",
+        "x-openai-audio-input-format":  "g711_ulaw;rate=8000", // 👈 REQUIRED
       },
     }
   );
@@ -469,7 +470,7 @@ wss.on("connection", (twilioWS) => {
     if (msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") {
       isAssistantSpeaking = true;
       const payload = msg.audio || msg.delta; // base64 μ-law
-      safeSendTwilio({ event: "media", media: { payload } });
+      sendMulawToTwilio(payload);
       return;
     }
     if (msg.type === "response.audio.done") {
@@ -617,6 +618,21 @@ wss.on("connection", (twilioWS) => {
       return;
     }
   });
+
+  function sendMulawToTwilio(b64) {
+    if (!twilioReady || !streamSid) return;
+    const raw = Buffer.from(b64, "base64");
+    const FRAME = 160; // 20ms @ 8kHz μ-law
+  
+    for (let i = 0; i < raw.length; i += FRAME) {
+      const slice = raw.subarray(i, Math.min(i + FRAME, raw.length));
+      safeSendTwilio({
+        event: "media",
+        streamSid,
+        media: { payload: slice.toString("base64") }
+      });
+    }
+  }
 
   // ---------- Closures & errors ----------
   twilioWS.on("close", () => {
