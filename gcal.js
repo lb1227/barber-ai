@@ -5,20 +5,14 @@ import fs from "fs";
 const {
   GOOGLE_CLIENT_ID,
   GOOGLE_CLIENT_SECRET,
-  GOOGLE_REDIRECT_URI, // e.g. https://barber-ai.onrender.com/oauth2callback
-  GOOGLE_CALENDAR_ID,  // preferred env var
-  CALENDAR_ID: LEGACY_CALENDAR_ID, // fallback name
+  GOOGLE_REDIRECT_URI,   // e.g. https://barber-ai.onrender.com/oauth2callback
+  CALENDAR_ID = "primary",
 } = process.env;
-
-// Use GOOGLE_CALENDAR_ID if present, else CALENDAR_ID, else "primary"
-const CALENDAR_ID = GOOGLE_CALENDAR_ID || LEGACY_CALENDAR_ID || "primary";
 
 const TOKEN_PATH = "./google_tokens.json";
 const SCOPES = [
   "https://www.googleapis.com/auth/calendar.events",
-  "https://www.googleapis.com/auth/calendar",
-  "openid",
-  "email",
+  "https://www.googleapis.com/auth/calendar.readonly",
   "https://www.googleapis.com/auth/userinfo.email",
 ];
 
@@ -53,19 +47,15 @@ function createOAuth2() {
 export function getAuthUrl() {
   const oauth2 = createOAuth2();
   return oauth2.generateAuthUrl({
-    access_type: "offline", // get refresh_token
-    prompt: "consent",      // ensure refresh_token on repeated connects
+    access_type: "offline",         // get refresh_token
+    prompt: "consent",              // ensure refresh_token on repeated connects
     scope: SCOPES,
-    redirect_uri: GOOGLE_REDIRECT_URI, // explicit to avoid mismatch
   });
 }
 
 export async function handleOAuthCallback(code) {
   const oauth2 = createOAuth2();
-  const { tokens } = await oauth2.getToken({
-    code,
-    redirect_uri: GOOGLE_REDIRECT_URI, // explicit to avoid mismatch
-  });
+  const { tokens } = await oauth2.getToken(code);
   oauth2.setCredentials(tokens);
   // Save immediately
   fs.writeFileSync(TOKEN_PATH, JSON.stringify(tokens, null, 2), "utf8");
@@ -107,6 +97,7 @@ export async function listEventsToday() {
   });
   return data.items || [];
 }
+
 
 function audit(type, payload) {
   const entry = { ts: new Date().toISOString(), type, ...payload };
