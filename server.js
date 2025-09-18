@@ -279,7 +279,9 @@ wss.on("connection", (twilioWS) => {
         if (bargeMs >= VAD.BARGE_IN_MIN_MS) {
           // Cancel current speech and start fresh capture on next frames
           console.log("[BARGE-IN] Canceling assistant (greeting or reply) due to caller speech");
-          safeSendOpenAI({ type: "response.cancel" });
+          if (isAssistantSpeaking || awaitingResponse) {
+            safeSendOpenAI({ type: "response.cancel" });
+          }
           isAssistantSpeaking = false;
           awaitingResponse = false;
           resetUserCapture();
@@ -556,7 +558,9 @@ async function finishToolCall(callId) {
   });
 
   // Speak confirmation (cancel any active response first)
-  safeSendOpenAI({ type: "response.cancel" });
+  if (isAssistantSpeaking || awaitingResponse) {
+    safeSendOpenAI({ type: "response.cancel" });
+  }
   safeSendOpenAI({
     type: "response.create",
     response: {
