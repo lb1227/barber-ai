@@ -113,6 +113,23 @@ function audit(type, payload) {
   fs.appendFile("audit.log", JSON.stringify(entry) + "\n", () => {});
 }
 
+export async function listEventsOn(dateIso) {
+  const cal = calendarClient();
+  const d = new Date(dateIso);
+  const start = new Date(d); start.setHours(0, 0, 0, 0);
+  const end   = new Date(d); end.setHours(23, 59, 59, 999);
+
+  const { data } = await cal.events.list({
+    calendarId: CALENDAR_ID,
+    timeMin: start.toISOString(),
+    timeMax: end.toISOString(),
+    singleEvents: true,
+    orderBy: "startTime",
+    maxResults: 50,
+  });
+  return data.items || [];
+}
+
 export async function createEvent({ summary, start, end, attendees = [], description = "" }) {
   const calendar = calendarClient();
   try {
