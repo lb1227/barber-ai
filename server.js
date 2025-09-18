@@ -462,8 +462,13 @@ wss.on("connection", (twilioWS) => {
       return;
     }
   
-    // Log selectively
-    if (!["response.output_audio.delta", "response.audio.delta"].includes(msg.type)) {
+    const NOISY_TYPES = new Set([
+      "response.audio_transcript.delta",
+      "response.output_audio.delta",
+      "response.audio.delta",
+    ]);
+    
+    if (!NOISY_TYPES.has(msg.type)) {
       console.log("[OpenAI EVENT]", msg.type);
     }
   
@@ -512,8 +517,8 @@ wss.on("connection", (twilioWS) => {
       let result = { ok: false, error: "Unknown tool" };
       if (entry.name === "book_appointment") {
         result = await handleBookAppointment(args);
-        console.log("[BOOK RESULT]", result);
       }
+      console.log("[BOOK RESULT]", result);
     
       // Return function result to conversation
       safeSendOpenAI({
