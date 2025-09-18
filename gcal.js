@@ -5,7 +5,7 @@ import fs from "fs";
 const {
   GOOGLE_CLIENT_ID,
   GOOGLE_CLIENT_SECRET,
-  GOOGLE_REDIRECT_URI, // e.g. https://barber-ai.onrender.com/oauth2callback
+  GOOGLE_REDIRECT_URI, 
   GOOGLE_CALENDAR_ID,  // preferred env var
   CALENDAR_ID: LEGACY_CALENDAR_ID, // fallback name
 } = process.env;
@@ -13,7 +13,24 @@ const {
 // Use GOOGLE_CALENDAR_ID if present, else CALENDAR_ID, else "primary"
 const CALENDAR_ID = GOOGLE_CALENDAR_ID || LEGACY_CALENDAR_ID || "primary";
 
-const TOKEN_PATH = "./google_tokens.json";
+import path from "path";
+
+const TOKEN_DIR = process.env.GOOGLE_TOKEN_DIR || "/data";
+if (!fs.existsSync(TOKEN_DIR)) fs.mkdirSync(TOKEN_DIR, { recursive: true });
+const TOKEN_PATH = path.join(TOKEN_DIR, "google_tokens.json");
+
+const TOK_B64 = process.env.GOOGLE_TOKENS_JSON_B64;
+if (TOK_B64 && !fs.existsSync(TOKEN_PATH)) {
+  try {
+    const buf = Buffer.from(TOK_B64, "base64").toString("utf8");
+    JSON.parse(buf); // validate
+    fs.writeFileSync(TOKEN_PATH, buf, "utf8");
+    console.log("[GCAL] Seeded tokens from env to", TOKEN_PATH);
+  } catch (e) {
+    console.warn("[GCAL] Failed to seed tokens from GOOGLE_TOKENS_JSON_B64:", e.message);
+  }
+}
+
 const SCOPES = [
   "https://www.googleapis.com/auth/calendar.events",
   "https://www.googleapis.com/auth/calendar",
@@ -22,33 +39,51 @@ const SCOPES = [
   "https://www.googleapis.com/auth/userinfo.email",
 ];
 
-function createOAuth2() {
-  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REDIRECT_URI) {
-    throw new Error("Missing Google OAuth env vars");
-  }
-  const oauth2 = new google.auth.OAuth2(
-    GOOGLE_CLIENT_ID,
-    GOOGLE_CLIENT_SECRET,
-    GOOGLE_REDIRECT_URI
-  );
+oauth2.on("tokens", (t) => {
+    let current = {};
+    try {
+      if (fs.existsSync(TOKEN_PATH)) {
+        current = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
+      }
+    } catch (e) {
+      console.warn("[GCAL] Could not read existing token file:", e.message);
+    }
+    const merged = { ...current, ...t };
+    fs.writeFileSync(TOKEN_PATH, JSON.stringify(merged, null, 2), "utf8");
+    console.log("[GCAL] Tokens updated. has_refresh:", !!merged.refresh_token);
+  });
+
+  return oauth2; // ✅ add this
+}
   // Load tokens from disk if present
   if (fs.existsSync(TOKEN_PATH)) {
-    const tokens = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
-    oauth2.setCredentials(tokens);
+    try {
+      const tokens = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
+      if (tokens && (tokens.refresh_token || tokens.access_token)) {
+        oauth2.setCredentials(tokens);
+        loaded = true;
+        console.log("[GCAL] Loaded tokens from", TOKEN_PATH, {
+          has_refresh: !!tokens.refresh_token
+        });
+      }
+    } catch (e) {
+      console.warn("[GCAL] Failed to parse tokens file", e.message);
+    }
   }
   // Persist refresh token updates
   oauth2.on("tokens", (t) => {
-    const current = fs.existsSync(TOKEN_PATH)
-      ? JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"))
-      : {};
-    fs.writeFileSync(
-      TOKEN_PATH,
-      JSON.stringify({ ...current, ...t }, null, 2),
-      "utf8"
-    );
+    let current = {};
+    try {
+      if (fs.existsSync(TOKEN_PATH)) {
+        current = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
+      }
+    } catch (e) {
+      console.warn("[GCAL] Could not read existing token file:", e.message);
+    }
+    const merged = { ...current, ...t };
+    fs.writeFileSync(TOKEN_PATH, JSON.stringify(merged, null, 2), "utf8");
+    console.log("[GCAL] Tokens updated. has_refresh:", !!merged.refresh_token);
   });
-  return oauth2;
-}
 
 export function getAuthUrl() {
   const oauth2 = createOAuth2();
