@@ -1,7 +1,7 @@
 // server.js
 import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
-import { getAuthUrl, handleOAuthCallback, whoAmI, listEventsToday, createEvent } from "./gcal.js";
+import { getAuthUrl, handleOAuthCallback, whoAmI, listEventsToday, createEvent, listEventsOn } from "./gcal.js";
 import { URL } from "url";
 
 function parseToolArgs(maybeJSON) {
@@ -341,12 +341,45 @@ wss.on("connection", (twilioWS) => {
           conversation: "auto",
           instructions:
             "If the caller requested a booking and details are complete, call book_appointment; " +
-            "otherwise ask concise follow-ups. Keep it brief and in American English." +
-            "If the caller provided name, service, start time, and duration, call the tool **named `book_appointment`** exactly. " +
+            "otherwise ask concise follow-ups. Keep it brief and in American English. " + // note space
+            "If the caller provided name, service, start time, and duration, call the tool named `book_appointment` exactly. " +
+            "If the caller asks about schedule/availability for a given day, call list_appointments. " +
             "Do not invent other tool names.",
         },
       });
       resetUserCapture();
+    }
+  }
+
+  async function handleListAppointments(args) {
+    const { day, date_iso } = args || {};
+    let target = date_iso ? new Date(date_iso) : new Date();
+  
+    if (!date_iso && day === "tomorrow") {
+      target.setDate(target.getDate() + 1);
+    } else if (!date_iso && day === "today") {
+      // keep as is
+    } else if (!date_iso && !day) {
+      // default to today
+    }
+  
+    try {
+      const items = await listEventsOn(target.toISOString());
+      // return a compact, model-friendly shape
+      return {
+        ok: true,
+        count: items.length,
+        events: items.map(e => ({
+          id: e.id,
+          summary: e.summary,
+          start: e.start?.dateTime || e.start?.date,
+          end:   e.end?.dateTime   || e.end?.date,
+          attendees: (e.attendees || []).map(a => a.email),
+          htmlLink: e.htmlLink
+        }))
+      };
+    } catch (e) {
+      return { ok: false, error: e?.message || "Calendar read error" };
     }
   }
 
@@ -445,6 +478,18 @@ wss.on("connection", (twilioWS) => {
               required: ["customer_name", "service", "start_iso", "duration_min"],
             },
           },
+        {
+            type: "function",
+            name: "list_appointments",
+            description: "List Google Calendar events for a specific day (today, tomorrow, or date_iso).",
+            parameters: {
+              type: "object",
+              properties: {
+                day: { type: "string", enum: ["today", "tomorrow"], description: "Shortcut day selector" },
+                date_iso: { type: "string", description: "Any date in ISO 8601; time ignored (e.g. 2025-09-18)" }
+              }
+            }
+          }
         ],
         tool_choice: "auto",
 
@@ -521,36 +566,52 @@ async function finishToolCall(callId) {
 
   const args = parseToolArgs(entry.argsText || "{}");
 
-  // Try to recover the tool name if it's missing
-  if (!entry.name && isBookingArgs(args)) {
-    entry.name = "book_appointment"; // you only have one tool; infer it
+  // Heuristics to infer tool name if the model omitted it
+  if (!entry.name) {
+    if (args && args.customer_name && args.service && args.start_iso && typeof args.duration_min !== "undefined") {
+      entry.name = "book_appointment";
+    } else if (args && (args.day || args.date_iso)) {
+      entry.name = "list_appointments";
+    }
   }
 
   const rawName = (entry.name || "").toLowerCase();
   console.log("[TOOL NAME]", rawName || "(missing)");
 
-  const isAlias =
-    rawName === "book_appointment" ||
-    rawName === "create_calendar_event" ||
-    rawName === "create_event" ||
-    rawName === "schedule_appointment" ||
-    (rawName && (rawName.includes("calendar") || rawName.includes("appointment")));
-
   let result = { ok: false, error: "Unknown tool" };
 
-  if (isAlias && isBookingArgs(args)) {
+  if (
+    rawName === "book_appointment" ||
+    rawName === "create_calendar_event" || // friendly aliases
+    rawName === "create_event" ||
+    rawName === "schedule_appointment" ||
+    (rawName && (rawName.includes("calendar") || rawName.includes("appointment")))
+  ) {
+    if (args && args.customer_name && args.service && args.start_iso && typeof args.duration_min !== "undefined") {
+      try {
+        result = await handleBookAppointment(args);
+      } catch (e) {
+        result = { ok: false, error: e?.message || "Book tool crash" };
+      }
+    }
+  } else if (
+    rawName === "list_appointments" ||
+    rawName === "check_schedule" ||
+    rawName === "list_events" ||
+    (rawName && rawName.includes("list") && rawName.includes("appointment"))
+  ) {
     try {
-      result = await handleBookAppointment(args);
+      result = await handleListAppointments(args);
     } catch (e) {
-      result = { ok: false, error: e?.message || "Book tool crash" };
+      result = { ok: false, error: e?.message || "List tool crash" };
     }
   } else {
-    console.log("[TOOL ROUTING] Name/args didn’t match booking tool.", { rawName, args });
+    console.log("[TOOL ROUTING] Name/args didn’t match any tool.", { rawName, args });
   }
 
-  console.log("[BOOK RESULT]", result);
+  console.log("[TOOL RESULT]", result);
 
-  // Return output to the model
+  // Send function result to conversation
   safeSendOpenAI({
     type: "conversation.item.create",
     item: {
@@ -560,22 +621,24 @@ async function finishToolCall(callId) {
     },
   });
 
-  // Speak confirmation (cancel only if needed)
-  if (isAssistantSpeaking || awaitingResponse) {
-    safeSendOpenAI({ type: "response.cancel" });
-  }
+  // Speak follow-up appropriate to the tool
+  if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
+  const followup = (rawName === "list_appointments")
+    ? "Summarize the schedule succinctly. Offer to book or answer availability questions."
+    : "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative.";
+
   safeSendOpenAI({
     type: "response.create",
     response: {
       modalities: ["audio", "text"],
       conversation: "auto",
-      instructions:
-        "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative.",
+      instructions: followup,
     },
   });
 
   delete openaiWS._toolCalls[callId];
 }
+
     
       // Start/created (either event family)
       if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
