@@ -507,10 +507,12 @@ wss.on("connection", (twilioWS) => {
       if (!callId || !entry) return;
     
       const args = parseToolArgs(entry.argsText || "{}");
+      console.log("[BOOK] invoking handleBookAppointment with:", args);
     
       let result = { ok: false, error: "Unknown tool" };
       if (entry.name === "book_appointment") {
         result = await handleBookAppointment(args);
+        console.log("[BOOK RESULT]", result);
       }
     
       // Return function result to conversation
@@ -541,6 +543,7 @@ wss.on("connection", (twilioWS) => {
       // Start/created (either event family)
       if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
         const { id, name, arguments: chunk } = msg.item;
+        console.log("[TOOL START]", name, "call_id=", id);
         const entry = ensureToolCall(id, name);
         if (entry && typeof chunk === "string") entry.argsText += chunk;
         return;
@@ -569,6 +572,7 @@ wss.on("connection", (twilioWS) => {
       // Done/completed (either family)
       if (msg.type === "response.function_call_arguments.done") {
         const id = msg.call_id || msg.item_id || msg.id;
+        console.log("[TOOL ARGS DONE] call_id=", id, "args=", openaiWS._toolCalls[id]?.argsText);
         await finishToolCall(id);
         return;
       }
