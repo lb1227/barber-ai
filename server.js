@@ -318,16 +318,17 @@ wss.on("connection", (twilioWS) => {
     const endedByTimeout = turnMs >= VAD.MAX_TURN_DURATION_MS;
 
     if ((utteranceLongEnough && endedBySilence) || endedByTimeout) {
-      // Guard: only commit if we have ≥ 10 frames (~200ms)
-      if (capturedFrames.length < Math.ceil(200 / VAD.FRAME_MS)) {
+      // Guard: must have at least ~100ms of audio (5 × 20ms frames)
+      if (capturedFrames.length < 5) {
         resetUserCapture();
         return;
       }
-
+      
       for (const f of capturedFrames) {
         safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
       }
       safeSendOpenAI({ type: "input_audio_buffer.commit" });
+
 
       awaitingResponse = true;
       console.log(`[TURN] committing: ${capturedFrames.length} frames, ${collectedBytes} bytes`);
@@ -488,87 +489,97 @@ wss.on("connection", (twilioWS) => {
     }
     if (msg.type === "error") {
       console.error("[OpenAI ERROR]", msg);
+      isAssistantSpeaking = false;
+      awaitingResponse = false;
       return;
     }
   
-    // ====== TOOL CALLS (unchanged) ======
     openaiWS._toolCalls = openaiWS._toolCalls || {};
     
-    if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
-      const call = msg.item;
-      const id = call.id;
-      const name = call.name;
+    function ensureToolCall(id, name) {
+      if (!id) return null;
       openaiWS._toolCalls[id] = openaiWS._toolCalls[id] || { name, argsText: "" };
-      if (typeof call.arguments === "string") {
-        openaiWS._toolCalls[id].argsText += call.arguments;
-      }
-      return;
+      return openaiWS._toolCalls[id];
     }
     
-    if (msg.type === "response.tool_call.created" || msg.type === "response.tool_call.delta") {
-      const call = msg.tool_call || {};
-      const id = call.id || msg.call_id;
-      if (!id) return;
-      const name = call.name;
-      openaiWS._toolCalls[id] = openaiWS._toolCalls[id] || { name, argsText: "" };
-      if (typeof call.arguments === "string") {
-        openaiWS._toolCalls[id].argsText += call.arguments;
-      }
-      return;
-    }
+    async function finishToolCall(callId) {
+      const entry = openaiWS._toolCalls[callId];
+      if (!callId || !entry) return;
     
-    if (msg.type === "response.tool_call.completed") {
-      const id = msg.tool_call?.id || msg.call_id;
-      const entry = id ? openaiWS._toolCalls[id] : null;
-      if (!entry) return;
       const args = parseToolArgs(entry.argsText || "{}");
+    
+      let result = { ok: false, error: "Unknown tool" };
       if (entry.name === "book_appointment") {
-        const result = await handleBookAppointment(args);
-        safeSendOpenAI({
-          type: "response.create",
-          response: {
-            modalities: ["audio", "text"],
-            conversation: "auto",
-            instructions: "Acknowledge the booking result clearly. If it failed, say why and suggest another time.",
-            tool_results: [{ tool_call_id: id, output: JSON.stringify(result) }],
-          },
-        });
+        result = await handleBookAppointment(args);
       }
-      return;
+    
+      // Return function result to conversation
+      safeSendOpenAI({
+        type: "conversation.item.create",
+        item: {
+          type: "function_call_output",
+          call_id: callId,
+          output: JSON.stringify(result),
+        },
+      });
+    
+      // Speak confirmation (cancel any active response first)
+      safeSendOpenAI({ type: "response.cancel" });
+      safeSendOpenAI({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          conversation: "auto",
+          instructions:
+            "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative.",
+        },
+      });
+    
+      delete openaiWS._toolCalls[callId];
     }
     
-    if (msg.type === "response.function_call_arguments.delta") {
-      const id = msg.call_id || msg.item_id || msg.id; // the event carries a call identifier
-      const name = msg.name;
-      if (!id) return;
-      openaiWS._toolCalls[id] = openaiWS._toolCalls[id] || { name, argsText: "" };
-      if (typeof msg.delta === "string") {
-        openaiWS._toolCalls[id].argsText += msg.delta; // streamed JSON chunk
+      // Start/created (either event family)
+      if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
+        const { id, name, arguments: chunk } = msg.item;
+        const entry = ensureToolCall(id, name);
+        if (entry && typeof chunk === "string") entry.argsText += chunk;
+        return;
       }
-      return;
-    }
+      if (msg.type === "response.tool_call.created") {
+        const { id, name, arguments: chunk } = msg.tool_call || {};
+        const entry = ensureToolCall(id, name);
+        if (entry && typeof chunk === "string") entry.argsText += chunk;
+        return;
+      }
     
-    if (msg.type === "response.function_call_arguments.done") {
-      const id = msg.call_id || msg.item_id || msg.id;
-      const entry = id ? openaiWS._toolCalls[id] : null;
-      if (!entry) return;
-      const args = parseToolArgs(entry.argsText || "{}");
-
-      if (entry.name === "book_appointment") {
-        const result = await handleBookAppointment(args);
-        safeSendOpenAI({
-          type: "response.create",
-          response: {
-            modalities: ["audio", "text"],
-            conversation: "auto",
-            instructions: "Acknowledge the booking result clearly. If it failed, say why and suggest another time.",
-            tool_results: [{ tool_call_id: id, output: JSON.stringify(result) }],
-          },
-        });
+      // Args streaming (either family)
+      if (msg.type === "response.function_call_arguments.delta") {
+        const id = msg.call_id || msg.item_id || msg.id;
+        const entry = ensureToolCall(id, msg.name);
+        if (entry && typeof msg.delta === "string") entry.argsText += msg.delta;
+        return;
       }
-      return;
-    }
-  }); // <-- CLOSES openaiWS.on("message", ...)
+      if (msg.type === "response.tool_call.delta") {
+        const { id, name, arguments: chunk } = msg.tool_call || {};
+        const entry = ensureToolCall(id, name);
+        if (entry && typeof chunk === "string") entry.argsText += chunk;
+        return;
+      }
+    
+      // Done/completed (either family)
+      if (msg.type === "response.function_call_arguments.done") {
+        const id = msg.call_id || msg.item_id || msg.id;
+        await finishToolCall(id);
+        return;
+      }
+      if (msg.type === "response.tool_call.completed") {
+        const id = msg.tool_call?.id || msg.call_id;
+        await finishToolCall(id);
+        return;
+      }
+    
+      // (Ignore other message types)
+    });
 
   // ---------- Twilio inbound ----------
   twilioWS.on("message", (raw) => {
