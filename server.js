@@ -565,53 +565,23 @@ async function finishToolCall(callId) {
   if (!callId || !entry) return;
 
   const args = parseToolArgs(entry.argsText || "{}");
-
-  // Heuristics to infer tool name if the model omitted it
-  if (!entry.name) {
-    if (args && args.customer_name && args.service && args.start_iso && typeof args.duration_min !== "undefined") {
-      entry.name = "book_appointment";
-    } else if (args && (args.day || args.date_iso)) {
-      entry.name = "list_appointments";
-    }
-  }
-
   const rawName = (entry.name || "").toLowerCase();
-  console.log("[TOOL NAME]", rawName || "(missing)");
+  console.log("[TOOL NAME]", rawName || "(missing)", "args=", args);
 
   let result = { ok: false, error: "Unknown tool" };
 
-  if (
-    rawName === "book_appointment" ||
-    rawName === "create_calendar_event" || // friendly aliases
-    rawName === "create_event" ||
-    rawName === "schedule_appointment" ||
-    (rawName && (rawName.includes("calendar") || rawName.includes("appointment")))
-  ) {
-    if (args && args.customer_name && args.service && args.start_iso && typeof args.duration_min !== "undefined") {
-      try {
-        result = await handleBookAppointment(args);
-      } catch (e) {
-        result = { ok: false, error: e?.message || "Book tool crash" };
-      }
-    }
-  } else if (
-    rawName === "list_appointments" ||
-    rawName === "check_schedule" ||
-    rawName === "list_events" ||
-    (rawName && rawName.includes("list") && rawName.includes("appointment"))
-  ) {
-    try {
-      result = await handleListAppointments(args);
-    } catch (e) {
-      result = { ok: false, error: e?.message || "List tool crash" };
-    }
+  if (rawName === "book_appointment") {
+    result = await handleBookAppointment(args);
+  } else if (rawName === "list_appointments") {
+    result = await handleListAppointments(args);
+  } else if (!rawName && isBookingArgs(args)) {
+    // name missing but args look like a booking → best-effort route
+    result = await handleBookAppointment(args);
   } else {
-    console.log("[TOOL ROUTING] Name/args didn’t match any tool.", { rawName, args });
+    console.log("[TOOL ROUTING] Unknown tool name:", rawName);
   }
 
-  console.log("[TOOL RESULT]", result);
-
-  // Send function result to conversation
+  // Return output to the model
   safeSendOpenAI({
     type: "conversation.item.create",
     item: {
@@ -621,23 +591,23 @@ async function finishToolCall(callId) {
     },
   });
 
-  // Speak follow-up appropriate to the tool
+  // Speak confirmation/answer
   if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
-  const followup = (rawName === "list_appointments")
-    ? "Summarize the schedule succinctly. Offer to book or answer availability questions."
-    : "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative.";
-
   safeSendOpenAI({
     type: "response.create",
     response: {
       modalities: ["audio", "text"],
       conversation: "auto",
-      instructions: followup,
+      instructions:
+        rawName === "book_appointment"
+          ? "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative."
+          : "Summarize the schedule for the requested day. If there are no events or an error, say so briefly.",
     },
   });
 
   delete openaiWS._toolCalls[callId];
 }
+
 
     
       // Start/created (either event family)
