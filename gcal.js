@@ -1,6 +1,8 @@
 // gcal.js
 import { google } from "googleapis";
 import fs from "fs";
+import path from "path";
+
 
 const {
   GOOGLE_CLIENT_ID,
@@ -13,11 +15,11 @@ const {
 // Use GOOGLE_CALENDAR_ID if present, else CALENDAR_ID, else "primary"
 const CALENDAR_ID = GOOGLE_CALENDAR_ID || LEGACY_CALENDAR_ID || "primary";
 
-import path from "path";
-
 const TOKEN_DIR = process.env.GOOGLE_TOKEN_DIR || "/data";
 if (!fs.existsSync(TOKEN_DIR)) fs.mkdirSync(TOKEN_DIR, { recursive: true });
 const TOKEN_PATH = path.join(TOKEN_DIR, "google_tokens.json");
+
+const AUDIT_PATH = path.join(TOKEN_DIR, "audit.log");
 
 const TOK_B64 = process.env.GOOGLE_TOKENS_JSON_B64;
 if (TOK_B64 && !fs.existsSync(TOKEN_PATH)) {
@@ -39,29 +41,22 @@ const SCOPES = [
   "https://www.googleapis.com/auth/userinfo.email",
 ];
 
-oauth2.on("tokens", (t) => {
-    let current = {};
-    try {
-      if (fs.existsSync(TOKEN_PATH)) {
-        current = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
-      }
-    } catch (e) {
-      console.warn("[GCAL] Could not read existing token file:", e.message);
-    }
-    const merged = { ...current, ...t };
-    fs.writeFileSync(TOKEN_PATH, JSON.stringify(merged, null, 2), "utf8");
-    console.log("[GCAL] Tokens updated. has_refresh:", !!merged.refresh_token);
-  });
+function createOAuth2() {
+  if (!GOOGLE_CLIENT_ID || !GOOGLE_CLIENT_SECRET || !GOOGLE_REDIRECT_URI) {
+    throw new Error("Missing Google OAuth env vars");
+  }
+  const oauth2 = new google.auth.OAuth2(
+    GOOGLE_CLIENT_ID,
+    GOOGLE_CLIENT_SECRET,
+    GOOGLE_REDIRECT_URI
+  );
 
-  return oauth2; // ✅ add this
-}
-  // Load tokens from disk if present
+  // Load tokens (if present)
   if (fs.existsSync(TOKEN_PATH)) {
     try {
       const tokens = JSON.parse(fs.readFileSync(TOKEN_PATH, "utf8"));
       if (tokens && (tokens.refresh_token || tokens.access_token)) {
         oauth2.setCredentials(tokens);
-        loaded = true;
         console.log("[GCAL] Loaded tokens from", TOKEN_PATH, {
           has_refresh: !!tokens.refresh_token
         });
@@ -70,7 +65,8 @@ oauth2.on("tokens", (t) => {
       console.warn("[GCAL] Failed to parse tokens file", e.message);
     }
   }
-  // Persist refresh token updates
+
+  // Persist new/updated tokens
   oauth2.on("tokens", (t) => {
     let current = {};
     try {
@@ -84,6 +80,9 @@ oauth2.on("tokens", (t) => {
     fs.writeFileSync(TOKEN_PATH, JSON.stringify(merged, null, 2), "utf8");
     console.log("[GCAL] Tokens updated. has_refresh:", !!merged.refresh_token);
   });
+
+  return oauth2;
+}
 
 export function getAuthUrl() {
   const oauth2 = createOAuth2();
@@ -145,7 +144,7 @@ export async function listEventsToday() {
 
 function audit(type, payload) {
   const entry = { ts: new Date().toISOString(), type, ...payload };
-  fs.appendFile("audit.log", JSON.stringify(entry) + "\n", () => {});
+  fs.appendFile(AUDIT_PATH, JSON.stringify(entry) + "\n", () => {});
 }
 
 export async function listEventsOn(dateIso) {
