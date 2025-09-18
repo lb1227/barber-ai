@@ -135,6 +135,7 @@ export async function listEventsToday() {
     calendarId: CALENDAR_ID,
     timeMin: start.toISOString(),
     timeMax: end.toISOString(),
+    timeZone: "America/New_York",
     singleEvents: true,
     orderBy: "startTime",
     maxResults: 25,
@@ -157,6 +158,7 @@ export async function listEventsOn(dateIso) {
     calendarId: CALENDAR_ID,
     timeMin: start.toISOString(),
     timeMax: end.toISOString(),
+    timeZone: "America/New_York",
     singleEvents: true,
     orderBy: "startTime",
     maxResults: 50,
@@ -172,8 +174,8 @@ export async function createEvent({ summary, start, end, attendees = [], descrip
       requestBody: {
         summary,
         description,
-        start: { dateTime: start },
-        end: { dateTime: end },
+        start: { dateTime: start, timeZone: "America/New_York" },
+        end: { dateTime: end, timeZone: "America/New_York" },
         attendees: attendees.map((email) => ({ email })),
       },
     });
