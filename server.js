@@ -339,7 +339,9 @@ wss.on("connection", (twilioWS) => {
           conversation: "auto",
           instructions:
             "If the caller requested a booking and details are complete, call book_appointment; " +
-            "otherwise ask concise follow-ups. Keep it brief and in American English.",
+            "otherwise ask concise follow-ups. Keep it brief and in American English." +
+            "If the caller provided name, service, start time, and duration, call the tool **named `book_appointment`** exactly. " +
+            "Do not invent other tool names.",
         },
       });
       resetUserCapture();
@@ -507,43 +509,66 @@ wss.on("connection", (twilioWS) => {
       return openaiWS._toolCalls[id];
     }
     
-    async function finishToolCall(callId) {
-      const entry = openaiWS._toolCalls[callId];
-      if (!callId || !entry) return;
-    
-      const args = parseToolArgs(entry.argsText || "{}");
-      console.log("[BOOK] invoking handleBookAppointment with:", args);
-    
-      let result = { ok: false, error: "Unknown tool" };
-      if (entry.name === "book_appointment") {
-        result = await handleBookAppointment(args);
-      }
-      console.log("[BOOK RESULT]", result);
-    
-      // Return function result to conversation
-      safeSendOpenAI({
-        type: "conversation.item.create",
-        item: {
-          type: "function_call_output",
-          call_id: callId,
-          output: JSON.stringify(result),
-        },
-      });
-    
-      // Speak confirmation (cancel any active response first)
-      safeSendOpenAI({ type: "response.cancel" });
-      safeSendOpenAI({
-        type: "response.create",
-        response: {
-          modalities: ["audio", "text"],
-          conversation: "auto",
-          instructions:
-            "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative.",
-        },
-      });
-    
-      delete openaiWS._toolCalls[callId];
+    function isBookingArgs(args) {
+  return !!(args && args.customer_name && args.service && args.start_iso && (args.duration_min ?? true));
+}
+
+async function finishToolCall(callId) {
+  const entry = openaiWS._toolCalls[callId];
+  if (!callId || !entry) return;
+
+  const args = parseToolArgs(entry.argsText || "{}");
+  const rawName = (entry.name || "").toLowerCase();
+  console.log("[TOOL NAME]", rawName);
+
+  // Normalize common aliases the model might use
+  const isAlias =
+    rawName === "book_appointment" ||
+    rawName === "create_calendar_event" ||
+    rawName === "create_event" ||
+    rawName === "schedule_appointment" ||
+    rawName.includes("calendar") ||
+    rawName.includes("appointment");
+
+  let result = { ok: false, error: "Unknown tool" };
+
+  if (isAlias && isBookingArgs(args)) {
+    // Route to our single implementation
+    try {
+      result = await handleBookAppointment(args);
+    } catch (e) {
+      result = { ok: false, error: e?.message || "Book tool crash" };
     }
+  } else {
+    console.log("[TOOL ROUTING] Name/args didn’t match booking tool.", { rawName, args });
+  }
+
+  console.log("[BOOK RESULT]", result);
+
+  // Return function result to conversation
+  safeSendOpenAI({
+    type: "conversation.item.create",
+    item: {
+      type: "function_call_output",
+      call_id: callId,
+      output: JSON.stringify(result),
+    },
+  });
+
+  // Speak confirmation (cancel any active response first)
+  safeSendOpenAI({ type: "response.cancel" });
+  safeSendOpenAI({
+    type: "response.create",
+    response: {
+      modalities: ["audio", "text"],
+      conversation: "auto",
+      instructions:
+        "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative.",
+    },
+  });
+
+  delete openaiWS._toolCalls[callId];
+}
     
       // Start/created (either event family)
       if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
