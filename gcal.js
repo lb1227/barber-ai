@@ -15,7 +15,7 @@ const {
 // Use GOOGLE_CALENDAR_ID if present, else CALENDAR_ID, else "primary"
 const CALENDAR_ID = GOOGLE_CALENDAR_ID || LEGACY_CALENDAR_ID || "primary";
 
-const TOKEN_DIR = process.env.GOOGLE_TOKEN_DIR || "/data";
+const TOKEN_DIR = process.env.GOOGLE_TOKEN_DIR || "/tmp/google_tokens";
 if (!fs.existsSync(TOKEN_DIR)) fs.mkdirSync(TOKEN_DIR, { recursive: true });
 const TOKEN_PATH = path.join(TOKEN_DIR, "google_tokens.json");
 
