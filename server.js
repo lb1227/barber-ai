@@ -510,7 +510,34 @@ wss.on("connection", (twilioWS) => {
       console.error("[OpenAI] parse error");
       return;
     }
-  
+
+    openaiWS._toolCalls   = openaiWS._toolCalls   || {};
+    openaiWS._toolIdAlias = openaiWS._toolIdAlias || {};
+    
+    function setAlias(itemId, callId) {
+      if (!itemId || !callId) return;
+      openaiWS._toolIdAlias[itemId] = callId;
+      openaiWS._toolIdAlias[callId] = itemId;
+    }
+    
+    function getEntryByAnyId({ call_id, item_id, id }) {
+      const tryIds = [call_id, item_id, id].filter(Boolean);
+      for (const key of tryIds) {
+        if (openaiWS._toolCalls[key]) return { key, entry: openaiWS._toolCalls[key] };
+        const alias = openaiWS._toolIdAlias[key];
+        if (alias && openaiWS._toolCalls[alias]) return { key: alias, entry: openaiWS._toolCalls[alias] };
+      }
+      return null;
+    }
+    
+    function ensureEntry(key, name) {
+      if (!key) return null;
+      openaiWS._toolCalls[key] = openaiWS._toolCalls[key] || { name, argsText: "" };
+      if (name && !openaiWS._toolCalls[key].name) openaiWS._toolCalls[key].name = name;
+      return openaiWS._toolCalls[key];
+    }
+
+    
     const NOISY_TYPES = new Set([
       "response.audio_transcript.delta",
       "response.output_audio.delta",
@@ -547,18 +574,13 @@ wss.on("connection", (twilioWS) => {
       awaitingResponse = false;
       return;
     }
-  
-    openaiWS._toolCalls = openaiWS._toolCalls || {};
-    
-    function ensureToolCall(id, name) {
-      if (!id) return null;
-      openaiWS._toolCalls[id] = openaiWS._toolCalls[id] || { name, argsText: "" };
-      return openaiWS._toolCalls[id];
-    }
     
     function isBookingArgs(args) {
-  return !!(args && args.customer_name && args.service && args.start_iso && (args.duration_min ?? true));
-}
+      return !!(args && args.customer_name && args.service && args.start_iso && (args.duration_min ?? true));
+    }
+    function isListArgs(args) {
+      return !!(args && (args.day || args.date_iso));
+    }
 
 async function finishToolCall(callId) {
   const entry = openaiWS._toolCalls[callId];
@@ -566,19 +588,20 @@ async function finishToolCall(callId) {
 
   const args = parseToolArgs(entry.argsText || "{}");
   const rawName = (entry.name || "").toLowerCase();
-  console.log("[TOOL NAME]", rawName || "(missing)", "args=", args);
+  const effectiveName =
+    rawName ||
+    (isBookingArgs(args) ? "book_appointment" : isListArgs(args) ? "list_appointments" : "");
+  
+  console.log("[TOOL NAME]", effectiveName || "(missing)", "args=", args);
 
   let result = { ok: false, error: "Unknown tool" };
 
-  if (rawName === "book_appointment") {
+  if (effectiveName === "book_appointment") {
     result = await handleBookAppointment(args);
-  } else if (rawName === "list_appointments") {
+  } else if (effectiveName === "list_appointments") {
     result = await handleListAppointments(args);
-  } else if (!rawName && isBookingArgs(args)) {
-    // name missing but args look like a booking → best-effort route
-    result = await handleBookAppointment(args);
   } else {
-    console.log("[TOOL ROUTING] Unknown tool name:", rawName);
+    console.log("[TOOL ROUTING] Unknown tool name:", rawName, "args=", args);
   }
 
   // Return output to the model
@@ -599,7 +622,7 @@ async function finishToolCall(callId) {
       modalities: ["audio", "text"],
       conversation: "auto",
       instructions:
-        rawName === "book_appointment"
+        effectiveName === "book_appointment"
           ? "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative."
           : "Summarize the schedule for the requested day. If there are no events or an error, say so briefly.",
     },
@@ -612,38 +635,56 @@ async function finishToolCall(callId) {
     
       // Start/created (either event family)
       if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
-        const { id, name, arguments: chunk } = msg.item;
-        console.log("[TOOL START]", name, "call_id=", id);
-        const entry = ensureToolCall(id, name);
+        const { id: itemId, name, arguments: chunk } = msg.item;
+        console.log("[TOOL START]", name, "call_id=", itemId);
+        const entry = ensureEntry(itemId, name);
         if (entry && typeof chunk === "string") entry.argsText += chunk;
         return;
       }
       if (msg.type === "response.tool_call.created") {
         const { id, name, arguments: chunk } = msg.tool_call || {};
-        const entry = ensureToolCall(id, name);
+        const entry = ensureEntry(id, name);
         if (entry && typeof chunk === "string") entry.argsText += chunk;
         return;
       }
     
       // Args streaming (either family)
       if (msg.type === "response.function_call_arguments.delta") {
-        const id = msg.call_id || msg.item_id || msg.id;
-        const entry = ensureToolCall(id, msg.name);
-        if (entry && typeof msg.delta === "string") entry.argsText += msg.delta;
+        const { call_id, item_id, name, delta } = msg;
+        if (call_id && item_id) setAlias(item_id, call_id);
+      
+        let hit = getEntryByAnyId({ call_id, item_id, id: msg.id });
+        if (!hit && item_id) hit = { key: item_id, entry: ensureEntry(item_id, name) };
+        if (!hit && call_id) hit = { key: call_id, entry: ensureEntry(call_id, name) };
+        if (hit?.entry && typeof delta === "string") hit.entry.argsText += delta;
         return;
       }
       if (msg.type === "response.tool_call.delta") {
         const { id, name, arguments: chunk } = msg.tool_call || {};
-        const entry = ensureToolCall(id, name);
+        const entry = ensureEntry(id, name);
         if (entry && typeof chunk === "string") entry.argsText += chunk;
         return;
       }
     
       // Done/completed (either family)
       if (msg.type === "response.function_call_arguments.done") {
-        const id = msg.call_id || msg.item_id || msg.id;
-        console.log("[TOOL ARGS DONE] call_id=", id, "args=", openaiWS._toolCalls[id]?.argsText);
-        await finishToolCall(id);
+        const { call_id, item_id, name } = msg;
+        if (call_id && item_id) setAlias(item_id, call_id);
+      
+        let hit = getEntryByAnyId({ call_id, item_id, id: msg.id });
+        if (!hit && item_id) hit = { key: item_id, entry: ensureEntry(item_id, name) };
+        if (!hit && call_id) hit = { key: call_id, entry: ensureEntry(call_id, name) };
+      
+        // migrate entry to call_id if it started under item_id
+        if (hit && call_id && hit.key !== call_id) {
+          openaiWS._toolCalls[call_id] = hit.entry;
+          delete openaiWS._toolCalls[hit.key];
+          setAlias(item_id || hit.key, call_id);
+        }
+      
+        const effectiveId = call_id || item_id || hit?.key;
+        console.log("[TOOL ARGS DONE] call_id=", effectiveId, "args=", hit?.entry?.argsText);
+        await finishToolCall(effectiveId);
         return;
       }
       if (msg.type === "response.tool_call.completed") {
