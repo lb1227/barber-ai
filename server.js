@@ -520,22 +520,25 @@ async function finishToolCall(callId) {
   if (!callId || !entry) return;
 
   const args = parseToolArgs(entry.argsText || "{}");
-  const rawName = (entry.name || "").toLowerCase();
-  console.log("[TOOL NAME]", rawName);
 
-  // Normalize common aliases the model might use
+  // Try to recover the tool name if it's missing
+  if (!entry.name && isBookingArgs(args)) {
+    entry.name = "book_appointment"; // you only have one tool; infer it
+  }
+
+  const rawName = (entry.name || "").toLowerCase();
+  console.log("[TOOL NAME]", rawName || "(missing)");
+
   const isAlias =
     rawName === "book_appointment" ||
     rawName === "create_calendar_event" ||
     rawName === "create_event" ||
     rawName === "schedule_appointment" ||
-    rawName.includes("calendar") ||
-    rawName.includes("appointment");
+    (rawName && (rawName.includes("calendar") || rawName.includes("appointment")));
 
   let result = { ok: false, error: "Unknown tool" };
 
   if (isAlias && isBookingArgs(args)) {
-    // Route to our single implementation
     try {
       result = await handleBookAppointment(args);
     } catch (e) {
@@ -547,7 +550,7 @@ async function finishToolCall(callId) {
 
   console.log("[BOOK RESULT]", result);
 
-  // Return function result to conversation
+  // Return output to the model
   safeSendOpenAI({
     type: "conversation.item.create",
     item: {
@@ -557,7 +560,7 @@ async function finishToolCall(callId) {
     },
   });
 
-  // Speak confirmation (cancel any active response first)
+  // Speak confirmation (cancel only if needed)
   if (isAssistantSpeaking || awaitingResponse) {
     safeSendOpenAI({ type: "response.cancel" });
   }
