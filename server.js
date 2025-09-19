@@ -196,7 +196,8 @@ const INSTRUCTIONS =
   "3) Do NOT reply to background noise, music, tones, or non-speech. Stay silent unless you detect human speech in English.\n" +
   "4) Be concise and professional. No backchannels. Stop speaking immediately if interrupted.\n" +
   "5) Never start a conversation on your own. Only respond after the caller has spoken English.\n" +
-  "6) Ask exactly ONE question at a time. Never combine multiple questions in one utterance; wait for the answer before asking the next question.";
+  "6) Ask exactly ONE question at a time. Use a single sentence, avoid “and”. If both date and time are missing, ask ONLY for the day first; after they answer, ask for the time.\n" +
+  "7) Never ask about appointment duration. Always assume 30 minutes and include it silently in tool calls. Only mention duration if the caller asks.";
 
 // ---------- Main bridge ----------
 wss.on("connection", (twilioWS) => {
@@ -349,13 +350,13 @@ wss.on("connection", (twilioWS) => {
           modalities: ["audio", "text"],
           conversation: "auto",
           instructions:
-            "If the caller requested a booking and details are complete, call book_appointment; " +
-            "otherwise ask concise follow-ups. Keep it brief and in American English. " +
-            "If the caller provided name, service, start time, and duration, call the tool named `book_appointment` exactly. " +
+            "If the caller requested a booking and details are complete, call book_appointment (include duration_min: 30 without asking). " +
+            "Otherwise ask concise follow-ups. Keep it brief and in American English. " +
+            "If the caller provided name, service, and a start time, call the tool named `book_appointment` exactly (and set duration_min: 30). " +
             "If the caller asks about schedule/availability for a given day, call list_appointments. " +
             "Do not invent other tool names. " +
-            "Ask exactly ONE question at a time and wait for the answer before asking another. " +
-            "If you are not certain the caller's last utterance was in English, DO NOT SPEAK; wait for more input.",
+            "Ask exactly ONE question at a time and wait for the answer before asking another. Never ask about duration; assume 30 minutes silently. " +
+            "If both date and time are missing, ask ONLY for the day first; after they answer, ask for the time.",
         },
       });
       resetUserCapture();
@@ -462,7 +463,7 @@ wss.on("connection", (twilioWS) => {
             name: "book_appointment",
             description:
               "Create a Google Calendar event for a haircut/barber service. " +
-              "Ask for any missing details before calling this.",
+              "Ask for any missing details before calling this. Never ask the caller about duration; always set duration_min to 30 minutes silently.",
             parameters: {
               type: "object",
               properties: {
@@ -476,7 +477,7 @@ wss.on("connection", (twilioWS) => {
                 },
                 duration_min: {
                   type: "number",
-                  description: "Duration in minutes (e.g. 30)",
+                  description: "Duration in minutes (always pass 30 unless the caller explicitly requests otherwise)",
                   default: 30,
                 },
                 notes: { type: "string", description: "Optional extra notes" },
@@ -620,6 +621,11 @@ async function finishToolCall(callId) {
   
   console.log("[TOOL NAME]", effectiveName || "(missing)", "args=", args);
 
+  // Enforce 30-min default silently if missing
+  if (effectiveName === "book_appointment" && (args.duration_min == null)) {
+    args.duration_min = 30;
+  }
+
   let result = { ok: false, error: "Unknown tool" };
 
   if (effectiveName === "book_appointment") {
@@ -649,7 +655,7 @@ async function finishToolCall(callId) {
       conversation: "auto",
       instructions:
         effectiveName === "book_appointment"
-          ? "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative. Ask exactly ONE question at a time."
+          ? "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative. Ask exactly ONE question at a time. Do not mention duration unless the caller asks."
           : "Summarize the schedule for the requested day. If there are no events or an error, say so briefly. Ask exactly ONE question at a time.",
     },
   });
