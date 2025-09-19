@@ -195,7 +195,8 @@ const INSTRUCTIONS =
   "2) If the caller is not speaking English, say exactly once: 'Sorry—I only speak English.' Then remain silent until you detect English.\n" +
   "3) Do NOT reply to background noise, music, tones, or non-speech. Stay silent unless you detect human speech in English.\n" +
   "4) Be concise and professional. No backchannels. Stop speaking immediately if interrupted.\n" +
-  "5) Never start a conversation on your own. Only respond after the caller has spoken English.";
+  "5) Never start a conversation on your own. Only respond after the caller has spoken English.\n" +
+  "6) For bookings: never ask about duration and don’t mention it. Assume 30 minutes by default unless the caller explicitly asks about duration.\n";
 
 // ---------- Main bridge ----------
 wss.on("connection", (twilioWS) => {
@@ -258,16 +259,6 @@ wss.on("connection", (twilioWS) => {
 
   let collectedBytes = 0;       // debug
   let capturedFrames = [];      // store base64 frames for this user turn
-
-  // --- Transcript gate state (for question-cut control) ---
-  let currentTranscript = "";
-  let sawQuestionMark = false;
-  let muteAssistantAudio = false;
-  let inGreeting = false;
-
-  // NEW:
-  let firstQIndex = -1;                // index of the first '?' in transcript
-  const POST_Q_CHAR_BUDGET = 80;       // allow ~one short sentence after '?'
 
   function resetUserCapture() {
     userSpeechActive = false;
@@ -351,10 +342,11 @@ wss.on("connection", (twilioWS) => {
           conversation: "auto",
           instructions:
             "If the caller requested a booking and details are complete, call book_appointment; " +
-            "otherwise ask concise follow-ups. Keep it brief and in American English. " + // note space
-            "If the caller provided name, service, start time, and duration, call the tool named `book_appointment` exactly. " +
+            "otherwise ask concise follow-ups. Keep it brief and in American English. " +
+            "If the caller provided name, service, and start time, assume a 30-minute duration and call the tool named `book_appointment`. " +
             "If the caller asks about schedule/availability for a given day, call list_appointments. " +
-            "Do not invent other tool names.",
+            "Never ask about duration and do not mention it unless the caller asks. " +
+            "Ask only one question at a time.",
         },
       });
       resetUserCapture();
@@ -405,7 +397,8 @@ wss.on("connection", (twilioWS) => {
       attendees = [],
     } = args || {};
 
-    if (!customer_name || !service || !start_iso || !duration_min) {
+    // CHANGED: do not require duration_min
+    if (!customer_name || !service || !start_iso) {
       return { ok: false, error: "Missing required fields." };
     }
 
@@ -444,7 +437,7 @@ wss.on("connection", (twilioWS) => {
 
   // ---------- OpenAI socket ----------
   openaiWS.on("open", () => {
-    console.log("[OpenAI] WS open");
+    console.log("[OpenAI] WS open]");
     // Configure to be *reactive only*; we do our own VAD and turn-taking.
     safeSendOpenAI({
       type: "session.update",
@@ -475,7 +468,7 @@ wss.on("connection", (twilioWS) => {
                 },
                 duration_min: {
                   type: "number",
-                  description: "Duration in minutes (e.g. 30)",
+                  description: "Duration in minutes. Do not ask or mention; assume 30 unless caller explicitly asks.",
                   default: 30,
                 },
                 notes: { type: "string", description: "Optional extra notes" },
@@ -485,10 +478,11 @@ wss.on("connection", (twilioWS) => {
                   description: "Optional attendee emails",
                 },
               },
-              required: ["customer_name", "service", "start_iso", "duration_min"],
+              // CHANGED: removed duration_min from required
+              required: ["customer_name", "service", "start_iso"],
             },
           },
-        {
+          {
             type: "function",
             name: "list_appointments",
             description: "List Google Calendar events for a specific day (today, tomorrow, or date_iso).",
@@ -557,35 +551,6 @@ wss.on("connection", (twilioWS) => {
     if (!NOISY_TYPES.has(msg.type)) {
       console.log("[OpenAI EVENT]", msg.type);
     }
-
-    // ====== TRANSCRIPT GATE (lets first question finish) ======
-    if (msg.type === "response.audio_transcript.delta") {
-      if (inGreeting) return; // don't gate the greeting
-      const delta = msg.delta || "";
-      if (!delta) return;
-
-      currentTranscript += delta;
-
-      const qCount = (currentTranscript.match(/\?/g) || []).length;
-
-      // Record the first '?' position but do NOT cancel yet
-      if (firstQIndex === -1) {
-        const idx = currentTranscript.indexOf("?");
-        if (idx !== -1) {
-          firstQIndex = idx;
-          sawQuestionMark = true;
-        }
-        return;
-      }
-
-      // After the first '?', allow a short tail; cancel on second '?' or long ramble
-      const charsAfterFirstQ = currentTranscript.length - firstQIndex - 1;
-      if (qCount >= 2 || charsAfterFirstQ > POST_Q_CHAR_BUDGET) {
-        muteAssistantAudio = true;
-        safeSendOpenAI({ type: "response.cancel" });
-      }
-      return;
-    }
   
     // ====== AUDIO STREAMING ======
     if (msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") {
@@ -596,14 +561,6 @@ wss.on("connection", (twilioWS) => {
     }
     if (msg.type === "response.audio.done") {
       isAssistantSpeaking = false;
-
-      // reset transcript gate on audio completion
-      inGreeting = false;
-      currentTranscript = "";
-      sawQuestionMark = false;
-      firstQIndex = -1;
-      muteAssistantAudio = false;
-
       return;
     }
     if (msg.type === "response.done") {
@@ -613,14 +570,6 @@ wss.on("connection", (twilioWS) => {
       if (!userSpeechActive) {
         safeSendOpenAI({ type: "input_audio_buffer.clear" });
       }
-
-      // extra safety reset
-      inGreeting = false;
-      currentTranscript = "";
-      sawQuestionMark = false;
-      firstQIndex = -1;
-      muteAssistantAudio = false;
-
       return;
     }
     if (msg.type === "error") {
@@ -793,7 +742,7 @@ async function finishToolCall(callId) {
     if (msg.event === "mark") return;
 
     if (msg.event === "stop") {
-      console.log("[Twilio] stop");
+      console.log("[Twilio] stop]");
       safeClose(openaiWS);
       safeClose(twilioWS);
       return;
