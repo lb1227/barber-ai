@@ -195,7 +195,8 @@ const INSTRUCTIONS =
   "2) If the caller is not clearly speaking English, DO NOT SPEAK. Stay silent and wait. Do not apologize or say you only speak English unless the caller explicitly asks about languages.\n" +
   "3) Do NOT reply to background noise, music, tones, or non-speech. Stay silent unless you detect human speech in English.\n" +
   "4) Be concise and professional. No backchannels. Stop speaking immediately if interrupted.\n" +
-  "5) Never start a conversation on your own. Only respond after the caller has spoken English.";
+  "5) Never start a conversation on your own. Only respond after the caller has spoken English.\n" +
+  "6) Ask exactly ONE question at a time. Never combine multiple questions in one utterance; wait for the answer before asking the next question.";
 
 // ---------- Main bridge ----------
 wss.on("connection", (twilioWS) => {
@@ -205,7 +206,7 @@ wss.on("connection", (twilioWS) => {
   let twilioReady = false;
   let streamSid = null;
 
-  // ---- NEW: greeting state + short cooldown after greeting
+  // ---- greeting state + cool-down after greeting
   let greetingInProgress = false;
   let postGreetingGuardUntil = 0; // ms timestamp; ignore VAD until this time
 
@@ -274,7 +275,7 @@ wss.on("connection", (twilioWS) => {
   }
 
   function appendUserAudio(b64) {
-    // ---- NEW: ignore everything for a brief moment right after greeting
+    // ignore everything briefly right after greeting
     if (Date.now() < postGreetingGuardUntil) {
       return;
     }
@@ -298,7 +299,7 @@ wss.on("connection", (twilioWS) => {
       } else {
         bargeMs = 0;
       }
-      return; // <-- do not queue frames while the bot is speaking
+      return; // do not queue frames while the bot is speaking
     }
 
     // --- Normal VAD capture path ---
@@ -353,6 +354,7 @@ wss.on("connection", (twilioWS) => {
             "If the caller provided name, service, start time, and duration, call the tool named `book_appointment` exactly. " +
             "If the caller asks about schedule/availability for a given day, call list_appointments. " +
             "Do not invent other tool names. " +
+            "Ask exactly ONE question at a time and wait for the answer before asking another. " +
             "If you are not certain the caller's last utterance was in English, DO NOT SPEAK; wait for more input.",
         },
       });
@@ -559,6 +561,14 @@ wss.on("connection", (twilioWS) => {
   
     // ====== AUDIO STREAMING ======
     if (msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") {
+      // NEW: never start/continue talking while the user is speaking
+      if (userSpeechActive) {
+        console.log("[TALK OVERLAP] User speaking; canceling assistant audio immediately");
+        if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
+        isAssistantSpeaking = false;
+        awaitingResponse = false;
+        return; // drop this audio frame
+      }
       isAssistantSpeaking = true;
       const payload = msg.audio || msg.delta; // base64 μ-law
       sendMulawToTwilio(payload);
@@ -572,7 +582,7 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
 
-      // ---- NEW: if the just-finished response was the greeting, add a brief guard
+      // if the just-finished response was the greeting, add a brief guard
       if (greetingInProgress) {
         greetingInProgress = false;
         postGreetingGuardUntil = Date.now() + 800; // ~0.8s cooldown before listening
@@ -639,8 +649,8 @@ async function finishToolCall(callId) {
       conversation: "auto",
       instructions:
         effectiveName === "book_appointment"
-          ? "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative."
-          : "Summarize the schedule for the requested day. If there are no events or an error, say so briefly.",
+          ? "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative. Ask exactly ONE question at a time."
+          : "Summarize the schedule for the requested day. If there are no events or an error, say so briefly. Ask exactly ONE question at a time.",
     },
   });
 
@@ -735,12 +745,12 @@ async function finishToolCall(callId) {
         type: "response.create",
         response: {
           modalities: ["audio", "text"],
-          conversation: "none", // ← CHANGED: make greeting stateless
+          conversation: "none",
           instructions: "Say exactly: 'Hello, thank you for calling the barbershop! How can I help you today.'"
         },
       });
-      greetingInProgress = true;     // ← NEW: mark greeting
-      awaitingResponse = true;       // prevent overlapping response.create while greeting plays
+      greetingInProgress = true;
+      awaitingResponse = true;
       return;
     }
 
