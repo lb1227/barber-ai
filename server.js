@@ -189,6 +189,11 @@ const VAD = {
   MAX_TURN_DURATION_MS: 6000,
 };
 
+// Extra gates to avoid talking into silence
+const FIRST_TURN_MIN_VOICED_FRAMES = 20;   // ~400ms (20 × 20ms) of voiced audio
+const SUBSEQUENT_MIN_VOICED_FRAMES = 8;    // ~160ms for later turns
+const PEAK_RMS_MIN = 0.06;                 // require a clear peak on energy
+
 const INSTRUCTIONS =
   "You are Barber AI, a phone receptionist. STRICT RULES:\n" +
   "1) Respond ONLY in clear American English.\n" +
@@ -255,9 +260,12 @@ wss.on("connection", (twilioWS) => {
   let silenceMs = 0;
   let turnMs = 0;
   let bargeMs = 0;              // NEW: continuous speech counter for barge-in
+  let hasHeardUser = false;     // NEW: first bona-fide utterance gate
 
   let collectedBytes = 0;       // debug
   let capturedFrames = [];      // store base64 frames for this user turn
+  let voicedFrames = 0;         // NEW: count frames above RMS_CONTINUE
+  let peakRms = 0;              // NEW: track loudest frame this turn
 
   function resetUserCapture() {
     userSpeechActive = false;
@@ -267,10 +275,13 @@ wss.on("connection", (twilioWS) => {
     bargeMs = 0;
     collectedBytes = 0;
     capturedFrames = [];
+    voicedFrames = 0;     // <—
+    peakRms = 0;          // <—
   }
 
   function appendUserAudio(b64) {
     const level = rmsOfMuLawBase64(b64);
+    peakRms = Math.max(peakRms, level); // <— track loudest frame
 
     // While assistant is speaking (e.g., greeting) ignore frames EXCEPT to allow barge-in cancel.
     if (isAssistantSpeaking || awaitingResponse) {
@@ -298,6 +309,7 @@ wss.on("connection", (twilioWS) => {
         userSpeechActive = true;
         userSpeechMs = VAD.FRAME_MS;
         silenceMs = 0;
+        if (level >= VAD.RMS_CONTINUE) voicedFrames++; // count if already voiced
       } else {
         return; // still idle/noise; do not store audio
       }
@@ -305,6 +317,7 @@ wss.on("connection", (twilioWS) => {
       if (level >= VAD.RMS_CONTINUE) {
         userSpeechMs += VAD.FRAME_MS;
         silenceMs = 0;
+        voicedFrames++;        // <— count voiced frames
       } else {
         silenceMs += VAD.FRAME_MS;
       }
@@ -325,12 +338,25 @@ wss.on("connection", (twilioWS) => {
         resetUserCapture();
         return;
       }
-      
+
+      // EXTRA GATES: be stricter for the very first user turn
+      const minVoiced = hasHeardUser ? SUBSEQUENT_MIN_VOICED_FRAMES
+                                     : FIRST_TURN_MIN_VOICED_FRAMES;
+      const passesVoiceGate = voicedFrames >= minVoiced && peakRms >= PEAK_RMS_MIN;
+      if (!passesVoiceGate) {
+        // treat as noise: drop it and keep waiting silently
+        safeSendOpenAI({ type: "input_audio_buffer.clear" });
+        resetUserCapture();
+        return;
+      }
+
       for (const f of capturedFrames) {
         safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
       }
       safeSendOpenAI({ type: "input_audio_buffer.commit" });
 
+      // We’ve definitely heard a human at least once now
+      hasHeardUser = true;
 
       awaitingResponse = true;
       console.log(`[TURN] committing: ${capturedFrames.length} frames, ${collectedBytes} bytes`);
@@ -341,9 +367,8 @@ wss.on("connection", (twilioWS) => {
           conversation: "auto",
           instructions:
             "If the caller requested a booking and details are complete, call book_appointment; " +
-            "otherwise ask concise follow-ups. Keep it brief and in American English. " +
-            "Assume appointments are 30 minutes unless the caller specifies a different length; do NOT ask about duration. " +
-            "If the caller provided name, service, and start time, call the tool named `book_appointment` (pass duration_min=30 if not specified). " +
+            "otherwise ask concise follow-ups. Keep it brief and in American English. " + // note space
+            "If the caller provided name, service, start time, and duration, call the tool named `book_appointment` exactly. " +
             "If the caller asks about schedule/availability for a given day, call list_appointments. " +
             "Do not invent other tool names.",
         },
@@ -396,7 +421,7 @@ wss.on("connection", (twilioWS) => {
       attendees = [],
     } = args || {};
 
-    if (!customer_name || !service || !start_iso /* duration optional now */) {
+    if (!customer_name || !service || !start_iso || !duration_min) {
       return { ok: false, error: "Missing required fields." };
     }
 
@@ -476,11 +501,10 @@ wss.on("connection", (twilioWS) => {
                   description: "Optional attendee emails",
                 },
               },
-              // >>> CHANGED: duration_min removed from required <<<
-              required: ["customer_name", "service", "start_iso"],
+              required: ["customer_name", "service", "start_iso", "duration_min"],
             },
           },
-          {
+        {
             type: "function",
             name: "list_appointments",
             description: "List Google Calendar events for a specific day (today, tomorrow, or date_iso).",
@@ -740,7 +764,7 @@ async function finishToolCall(callId) {
     if (msg.event === "mark") return;
 
     if (msg.event === "stop") {
-      console.log("[Twilio] stop]");
+      console.log("[Twilio] stop");
       safeClose(openaiWS);
       safeClose(twilioWS);
       return;
@@ -764,11 +788,11 @@ async function finishToolCall(callId) {
 
   // ---------- Closures & errors ----------
   twilioWS.on("close", () => {
-    console.log("[Twilio] closed]");
+    console.log("[Twilio] closed");
     safeClose(openaiWS);
   });
   openaiWS.on("close", () => {
-    console.log("[OpenAI] closed]");
+    console.log("[OpenAI] closed");
     safeClose(twilioWS);
   });
   twilioWS.on("error", (e) => console.error("[Twilio WS error]", e));
