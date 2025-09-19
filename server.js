@@ -205,6 +205,10 @@ wss.on("connection", (twilioWS) => {
   let twilioReady = false;
   let streamSid = null;
 
+  // ---- NEW: greeting state + short cooldown after greeting
+  let greetingInProgress = false;
+  let postGreetingGuardUntil = 0; // ms timestamp; ignore VAD until this time
+
   // OpenAI WS
   const openaiWS = new WebSocket(
     `wss://api.openai.com/v1/realtime?model=${encodeURIComponent(
@@ -254,7 +258,7 @@ wss.on("connection", (twilioWS) => {
   let userSpeechMs = 0;
   let silenceMs = 0;
   let turnMs = 0;
-  let bargeMs = 0;              // NEW: continuous speech counter for barge-in
+  let bargeMs = 0;              // continuous speech counter for barge-in
 
   let collectedBytes = 0;       // debug
   let capturedFrames = [];      // store base64 frames for this user turn
@@ -270,6 +274,11 @@ wss.on("connection", (twilioWS) => {
   }
 
   function appendUserAudio(b64) {
+    // ---- NEW: ignore everything for a brief moment right after greeting
+    if (Date.now() < postGreetingGuardUntil) {
+      return;
+    }
+
     const level = rmsOfMuLawBase64(b64);
 
     // While assistant is speaking (e.g., greeting) ignore frames EXCEPT to allow barge-in cancel.
@@ -330,7 +339,6 @@ wss.on("connection", (twilioWS) => {
         safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
       }
       safeSendOpenAI({ type: "input_audio_buffer.commit" });
-
 
       awaitingResponse = true;
       console.log(`[TURN] committing: ${capturedFrames.length} frames, ${collectedBytes} bytes`);
@@ -563,6 +571,13 @@ wss.on("connection", (twilioWS) => {
     if (msg.type === "response.done") {
       isAssistantSpeaking = false;
       awaitingResponse = false;
+
+      // ---- NEW: if the just-finished response was the greeting, add a brief guard
+      if (greetingInProgress) {
+        greetingInProgress = false;
+        postGreetingGuardUntil = Date.now() + 800; // ~0.8s cooldown before listening
+      }
+
       // Only clear if we’re not currently capturing a user turn
       if (!userSpeechActive) {
         safeSendOpenAI({ type: "input_audio_buffer.clear" });
@@ -720,12 +735,12 @@ async function finishToolCall(callId) {
         type: "response.create",
         response: {
           modalities: ["audio", "text"],
-          conversation: "auto", // don't use prior convo state; ensures consistency
-          // Use EXACT phrasing; this overrides session instructions for this reply
+          conversation: "none", // ← CHANGED: make greeting stateless
           instructions: "Say exactly: 'Hello, thank you for calling the barbershop! How can I help you today.'"
         },
       });
-      awaitingResponse = true; // prevent overlapping response.create while greeting plays
+      greetingInProgress = true;     // ← NEW: mark greeting
+      awaitingResponse = true;       // prevent overlapping response.create while greeting plays
       return;
     }
 
