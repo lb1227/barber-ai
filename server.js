@@ -341,8 +341,9 @@ wss.on("connection", (twilioWS) => {
           conversation: "auto",
           instructions:
             "If the caller requested a booking and details are complete, call book_appointment; " +
-            "otherwise ask concise follow-ups. Keep it brief and in American English. " + // note space
-            "If the caller provided name, service, start time, and duration, call the tool named `book_appointment` exactly. " +
+            "otherwise ask concise follow-ups. Keep it brief and in American English. " +
+            "Assume appointments are 30 minutes unless the caller specifies a different length; do NOT ask about duration. " +
+            "If the caller provided name, service, and start time, call the tool named `book_appointment` (pass duration_min=30 if not specified). " +
             "If the caller asks about schedule/availability for a given day, call list_appointments. " +
             "Do not invent other tool names.",
         },
@@ -395,7 +396,7 @@ wss.on("connection", (twilioWS) => {
       attendees = [],
     } = args || {};
 
-    if (!customer_name || !service || !start_iso || !duration_min) {
+    if (!customer_name || !service || !start_iso /* duration optional now */) {
       return { ok: false, error: "Missing required fields." };
     }
 
@@ -434,7 +435,7 @@ wss.on("connection", (twilioWS) => {
 
   // ---------- OpenAI socket ----------
   openaiWS.on("open", () => {
-    console.log("[OpenAI] WS open");
+    console.log("[OpenAI] WS open]");
     // Configure to be *reactive only*; we do our own VAD and turn-taking.
     safeSendOpenAI({
       type: "session.update",
@@ -475,10 +476,11 @@ wss.on("connection", (twilioWS) => {
                   description: "Optional attendee emails",
                 },
               },
-              required: ["customer_name", "service", "start_iso", "duration_min"],
+              // >>> CHANGED: duration_min removed from required <<<
+              required: ["customer_name", "service", "start_iso"],
             },
           },
-        {
+          {
             type: "function",
             name: "list_appointments",
             description: "List Google Calendar events for a specific day (today, tomorrow, or date_iso).",
@@ -738,7 +740,7 @@ async function finishToolCall(callId) {
     if (msg.event === "mark") return;
 
     if (msg.event === "stop") {
-      console.log("[Twilio] stop");
+      console.log("[Twilio] stop]");
       safeClose(openaiWS);
       safeClose(twilioWS);
       return;
@@ -762,11 +764,11 @@ async function finishToolCall(callId) {
 
   // ---------- Closures & errors ----------
   twilioWS.on("close", () => {
-    console.log("[Twilio] closed");
+    console.log("[Twilio] closed]");
     safeClose(openaiWS);
   });
   openaiWS.on("close", () => {
-    console.log("[OpenAI] closed");
+    console.log("[OpenAI] closed]");
     safeClose(twilioWS);
   });
   twilioWS.on("error", (e) => console.error("[Twilio WS error]", e));
