@@ -181,13 +181,14 @@ function rmsOfMuLawBase64(b64) {
 // (Stricter thresholds so the bot stays quiet until real speech)
 const VAD = {
   FRAME_MS: 20,          // Twilio sends ~20ms frames
-  RMS_START: 0.04,       // was 0.02
-  RMS_CONTINUE: 0.03,    // was 0.015
-  MIN_SPEECH_MS: 200,    // was 80ms
-  END_SILENCE_MS: 1000,
+  RMS_START: 0.055,      // was 0.04
+  RMS_CONTINUE: 0.040,   // was 0.03
+  MIN_SPEECH_MS: 320,    // was 200ms
+  END_SILENCE_MS: 1200,  // was 1000
   BARGE_IN_MIN_MS: 150,  // speak ≥150ms to barge-in
   MAX_TURN_DURATION_MS: 6000,
 };
+const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
 
 const INSTRUCTIONS =
   "You are Barber AI, a phone receptionist. STRICT RULES:\n" +
@@ -196,7 +197,7 @@ const INSTRUCTIONS =
   "3) Do NOT reply to background noise, music, tones, or non-speech. Stay silent unless you detect human speech in English.\n" +
   "4) Be concise and professional. No backchannels. Stop speaking immediately if interrupted.\n" +
   "5) Never start a conversation on your own. Only respond after the caller has spoken English.\n" +
-  "6) For bookings: never ask about duration and don’t mention it. Assume 30 minutes by default unless the caller explicitly asks about duration.\n";
+  "7) Never proceed with booking until you have name, date+time, service, and phone captured from the caller. After asking a question, wait silently.\n";
 
 // ---------- Main bridge ----------
 wss.on("connection", (twilioWS) => {
@@ -255,10 +256,13 @@ wss.on("connection", (twilioWS) => {
   let userSpeechMs = 0;
   let silenceMs = 0;
   let turnMs = 0;
-  let bargeMs = 0;              // NEW: continuous speech counter for barge-in
+  let bargeMs = 0;              // continuous speech counter for barge-in
 
   let collectedBytes = 0;       // debug
   let capturedFrames = [];      // store base64 frames for this user turn
+  let sumLevel = 0;             // NEW: for average RMS
+  let levelCount = 0;           // NEW: for average RMS
+  let greetingInFlight = false; // NEW: disable listening during greeting
 
   function resetUserCapture() {
     userSpeechActive = false;
@@ -268,9 +272,14 @@ wss.on("connection", (twilioWS) => {
     bargeMs = 0;
     collectedBytes = 0;
     capturedFrames = [];
+    sumLevel = 0;
+    levelCount = 0;
   }
 
   function appendUserAudio(b64) {
+    // Do NOT listen during the greeting
+    if (greetingInFlight) return;
+
     const level = rmsOfMuLawBase64(b64);
 
     // While assistant is speaking (e.g., greeting) ignore frames EXCEPT to allow barge-in cancel.
@@ -314,6 +323,9 @@ wss.on("connection", (twilioWS) => {
     capturedFrames.push(b64);
     collectedBytes += Buffer.from(b64, "base64").length;
     turnMs += VAD.FRAME_MS;
+    // accumulate average level for this turn
+    sumLevel += level;
+    levelCount += 1;
 
     // End-of-utterance?
     const utteranceLongEnough = userSpeechMs >= VAD.MIN_SPEECH_MS;
@@ -326,12 +338,18 @@ wss.on("connection", (twilioWS) => {
         resetUserCapture();
         return;
       }
+
+      // Reject very quiet "turns" (likely background noise)
+      const avgLevel = levelCount ? (sumLevel / levelCount) : 0;
+      if (avgLevel < MIN_AVG_RMS) {
+        resetUserCapture();
+        return;
+      }
       
       for (const f of capturedFrames) {
         safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
       }
       safeSendOpenAI({ type: "input_audio_buffer.commit" });
-
 
       awaitingResponse = true;
       console.log(`[TURN] committing: ${capturedFrames.length} frames, ${collectedBytes} bytes`);
@@ -343,10 +361,10 @@ wss.on("connection", (twilioWS) => {
           instructions:
             "If the caller requested a booking and details are complete, call book_appointment; " +
             "otherwise ask concise follow-ups. Keep it brief and in American English. " +
-            "If the caller provided name, service, and start time, assume a 30-minute duration and call the tool named `book_appointment`. " +
+            "Ask exactly one question in your next message. Do not chain multiple questions. " +
+            "If the caller provided name, service, start time, and phone, call the tool named `book_appointment` exactly. " +
             "If the caller asks about schedule/availability for a given day, call list_appointments. " +
-            "Never ask about duration and do not mention it unless the caller asks. " +
-            "Ask only one question at a time.",
+            "Do not invent other tool names.",
         },
       });
       resetUserCapture();
@@ -397,9 +415,13 @@ wss.on("connection", (twilioWS) => {
       attendees = [],
     } = args || {};
 
-    // CHANGED: do not require duration_min
-    if (!customer_name || !service || !start_iso) {
+    const PHONE_RE = /(?:\+?\d[\d\s().-]{6,}\d)/;
+
+    if (!customer_name || !service || !start_iso || !phone) {
       return { ok: false, error: "Missing required fields." };
+    }
+    if (!PHONE_RE.test(String(phone))) {
+      return { ok: false, error: "Invalid phone number." };
     }
 
     const start = new Date(start_iso);
@@ -437,7 +459,7 @@ wss.on("connection", (twilioWS) => {
 
   // ---------- OpenAI socket ----------
   openaiWS.on("open", () => {
-    console.log("[OpenAI] WS open]");
+    console.log("[OpenAI] WS open");
     // Configure to be *reactive only*; we do our own VAD and turn-taking.
     safeSendOpenAI({
       type: "session.update",
@@ -468,7 +490,7 @@ wss.on("connection", (twilioWS) => {
                 },
                 duration_min: {
                   type: "number",
-                  description: "Duration in minutes. Do not ask or mention; assume 30 unless caller explicitly asks.",
+                  description: "Duration in minutes (e.g. 30)",
                   default: 30,
                 },
                 notes: { type: "string", description: "Optional extra notes" },
@@ -478,8 +500,8 @@ wss.on("connection", (twilioWS) => {
                   description: "Optional attendee emails",
                 },
               },
-              // CHANGED: removed duration_min from required
-              required: ["customer_name", "service", "start_iso"],
+              // CHANGED: require phone; do not require duration_min
+              required: ["customer_name", "service", "start_iso", "phone"],
             },
           },
           {
@@ -566,6 +588,7 @@ wss.on("connection", (twilioWS) => {
     if (msg.type === "response.done") {
       isAssistantSpeaking = false;
       awaitingResponse = false;
+      if (greetingInFlight) greetingInFlight = false; // <- stop greeting lock
       // Only clear if we’re not currently capturing a user turn
       if (!userSpeechActive) {
         safeSendOpenAI({ type: "input_audio_buffer.clear" });
@@ -580,125 +603,143 @@ wss.on("connection", (twilioWS) => {
     }
     
     function isBookingArgs(args) {
-      return !!(args && args.customer_name && args.service && args.start_iso && (args.duration_min ?? true));
+      return !!(args && args.customer_name && args.service && args.start_iso && args.phone);
     }
     function isListArgs(args) {
       return !!(args && (args.day || args.date_iso));
     }
 
-async function finishToolCall(callId) {
-  const entry = openaiWS._toolCalls[callId];
-  if (!callId || !entry) return;
+    async function finishToolCall(callId) {
+      const entry = openaiWS._toolCalls[callId];
+      if (!callId || !entry) return;
 
-  const args = parseToolArgs(entry.argsText || "{}");
-  const rawName = (entry.name || "").toLowerCase();
-  const effectiveName =
-    rawName ||
-    (isBookingArgs(args) ? "book_appointment" : isListArgs(args) ? "list_appointments" : "");
-  
-  console.log("[TOOL NAME]", effectiveName || "(missing)", "args=", args);
-
-  let result = { ok: false, error: "Unknown tool" };
-
-  if (effectiveName === "book_appointment") {
-    result = await handleBookAppointment(args);
-  } else if (effectiveName === "list_appointments") {
-    result = await handleListAppointments(args);
-  } else {
-    console.log("[TOOL ROUTING] Unknown tool name:", rawName, "args=", args);
-  }
-
-  // Return output to the model
-  safeSendOpenAI({
-    type: "conversation.item.create",
-    item: {
-      type: "function_call_output",
-      call_id: callId,
-      output: JSON.stringify(result),
-    },
-  });
-
-  // Speak confirmation/answer
-  if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
-  safeSendOpenAI({
-    type: "response.create",
-    response: {
-      modalities: ["audio", "text"],
-      conversation: "auto",
-      instructions:
-        effectiveName === "book_appointment"
-          ? "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative."
-          : "Summarize the schedule for the requested day. If there are no events or an error, say so briefly.",
-    },
-  });
-
-  delete openaiWS._toolCalls[callId];
-}
-
-
-    
-      // Start/created (either event family)
-      if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
-        const { id: itemId, name, arguments: chunk } = msg.item;
-        console.log("[TOOL START]", name, "call_id=", itemId);
-        const entry = ensureEntry(itemId, name);
-        if (entry && typeof chunk === "string") entry.argsText += chunk;
-        return;
-      }
-      if (msg.type === "response.tool_call.created") {
-        const { id, name, arguments: chunk } = msg.tool_call || {};
-        const entry = ensureEntry(id, name);
-        if (entry && typeof chunk === "string") entry.argsText += chunk;
-        return;
-      }
-    
-      // Args streaming (either family)
-      if (msg.type === "response.function_call_arguments.delta") {
-        const { call_id, item_id, name, delta } = msg;
-        if (call_id && item_id) setAlias(item_id, call_id);
+      const args = parseToolArgs(entry.argsText || "{}");
+      const rawName = (entry.name || "").toLowerCase();
+      const effectiveName =
+        rawName ||
+        (isBookingArgs(args) ? "book_appointment" : isListArgs(args) ? "list_appointments" : "");
       
-        let hit = getEntryByAnyId({ call_id, item_id, id: msg.id });
-        if (!hit && item_id) hit = { key: item_id, entry: ensureEntry(item_id, name) };
-        if (!hit && call_id) hit = { key: call_id, entry: ensureEntry(call_id, name) };
-        if (hit?.entry && typeof delta === "string") hit.entry.argsText += delta;
-        return;
-      }
-      if (msg.type === "response.tool_call.delta") {
-        const { id, name, arguments: chunk } = msg.tool_call || {};
-        const entry = ensureEntry(id, name);
-        if (entry && typeof chunk === "string") entry.argsText += chunk;
-        return;
-      }
-    
-      // Done/completed (either family)
-      if (msg.type === "response.function_call_arguments.done") {
-        const { call_id, item_id, name } = msg;
-        if (call_id && item_id) setAlias(item_id, call_id);
-      
-        let hit = getEntryByAnyId({ call_id, item_id, id: msg.id });
-        if (!hit && item_id) hit = { key: item_id, entry: ensureEntry(item_id, name) };
-        if (!hit && call_id) hit = { key: call_id, entry: ensureEntry(call_id, name) };
-      
-        // migrate entry to call_id if it started under item_id
-        if (hit && call_id && hit.key !== call_id) {
-          openaiWS._toolCalls[call_id] = hit.entry;
-          delete openaiWS._toolCalls[hit.key];
-          setAlias(item_id || hit.key, call_id);
+      console.log("[TOOL NAME]", effectiveName || "(missing)", "args=", args);
+
+      // GATE: require phone before booking; ask ONLY for phone if missing/invalid
+      if (effectiveName === "book_appointment") {
+        const PHONE_RE = /(?:\+?\d[\d\s().-]{6,}\d)/;
+        if (!args?.phone || !PHONE_RE.test(String(args.phone))) {
+          if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
+          awaitingResponse = true;
+          safeSendOpenAI({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              conversation: "auto",
+              instructions:
+                "Ask exactly one question only: 'What’s the best phone number to reach you?' " +
+                "Do not ask anything else in the same turn. After asking, wait silently."
+            }
+          });
+          return; // do not proceed to booking
         }
-      
-        const effectiveId = call_id || item_id || hit?.key;
-        console.log("[TOOL ARGS DONE] call_id=", effectiveId, "args=", hit?.entry?.argsText);
-        await finishToolCall(effectiveId);
-        return;
       }
-      if (msg.type === "response.tool_call.completed") {
-        const id = msg.tool_call?.id || msg.call_id;
-        await finishToolCall(id);
-        return;
+
+      let result = { ok: false, error: "Unknown tool" };
+
+      if (effectiveName === "book_appointment") {
+        result = await handleBookAppointment(args);
+      } else if (effectiveName === "list_appointments") {
+        result = await handleListAppointments(args);
+      } else {
+        console.log("[TOOL ROUTING] Unknown tool name:", rawName, "args=", args);
+      }
+
+      // Return output to the model
+      safeSendOpenAI({
+        type: "conversation.item.create",
+        item: {
+          type: "function_call_output",
+          call_id: callId,
+          output: JSON.stringify(result),
+        },
+      });
+
+      // Speak confirmation/answer
+      if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
+      safeSendOpenAI({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          conversation: "auto",
+          instructions:
+            effectiveName === "book_appointment"
+              ? "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative."
+              : "Summarize the schedule for the requested day. If there are no events or an error, say so briefly.",
+        },
+      });
+
+      delete openaiWS._toolCalls[callId];
+    }
+
+    // Start/created (either event family)
+    if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
+      const { id: itemId, name, arguments: chunk } = msg.item;
+      console.log("[TOOL START]", name, "call_id=", itemId);
+      const entry = ensureEntry(itemId, name);
+      if (entry && typeof chunk === "string") entry.argsText += chunk;
+      return;
+    }
+    if (msg.type === "response.tool_call.created") {
+      const { id, name, arguments: chunk } = msg.tool_call || {};
+      const entry = ensureEntry(id, name);
+      if (entry && typeof chunk === "string") entry.argsText += chunk;
+      return;
+    }
+  
+    // Args streaming (either family)
+    if (msg.type === "response.function_call_arguments.delta") {
+      const { call_id, item_id, name, delta } = msg;
+      if (call_id && item_id) setAlias(item_id, call_id);
+    
+      let hit = getEntryByAnyId({ call_id, item_id, id: msg.id });
+      if (!hit && item_id) hit = { key: item_id, entry: ensureEntry(item_id, name) };
+      if (!hit && call_id) hit = { key: call_id, entry: ensureEntry(call_id, name) };
+      if (hit?.entry && typeof delta === "string") hit.entry.argsText += delta;
+      return;
+    }
+    if (msg.type === "response.tool_call.delta") {
+      const { id, name, arguments: chunk } = msg.tool_call || {};
+      const entry = ensureEntry(id, name);
+      if (entry && typeof chunk === "string") entry.argsText += chunk;
+      return;
+    }
+  
+    // Done/completed (either family)
+    if (msg.type === "response.function_call_arguments.done") {
+      const { call_id, item_id, name } = msg;
+      if (call_id && item_id) setAlias(item_id, call_id);
+    
+      let hit = getEntryByAnyId({ call_id, item_id, id: msg.id });
+      if (!hit && item_id) hit = { key: item_id, entry: ensureEntry(item_id, name) };
+      if (!hit && call_id) hit = { key: call_id, entry: ensureEntry(call_id, name) };
+    
+      // migrate entry to call_id if it started under item_id
+      if (hit && call_id && hit.key !== call_id) {
+        openaiWS._toolCalls[call_id] = hit.entry;
+        delete openaiWS._toolCalls[hit.key];
+        setAlias(item_id || hit.key, call_id);
       }
     
-      // (Ignore other message types)
-    });
+      const effectiveId = call_id || item_id || hit?.key;
+      console.log("[TOOL ARGS DONE] call_id=", effectiveId, "args=", hit?.entry?.argsText);
+      await finishToolCall(effectiveId);
+      return;
+    }
+    if (msg.type === "response.tool_call.completed") {
+      const id = msg.tool_call?.id || msg.call_id;
+      await finishToolCall(id);
+      return;
+    }
+  
+    // (Ignore other message types)
+  });
 
   // ---------- Twilio inbound ----------
   twilioWS.on("message", (raw) => {
@@ -719,6 +760,7 @@ async function finishToolCall(callId) {
       resetUserCapture();
     
       // One-time deterministic greeting from the AI (not Twilio <Say/>)
+      greetingInFlight = true; // <- do not listen during greeting
       safeSendOpenAI({
         type: "response.create",
         response: {
@@ -742,7 +784,7 @@ async function finishToolCall(callId) {
     if (msg.event === "mark") return;
 
     if (msg.event === "stop") {
-      console.log("[Twilio] stop]");
+      console.log("[Twilio] stop");
       safeClose(openaiWS);
       safeClose(twilioWS);
       return;
