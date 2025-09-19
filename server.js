@@ -181,13 +181,12 @@ function rmsOfMuLawBase64(b64) {
 // (Stricter thresholds so the bot stays quiet until real speech)
 const VAD = {
   FRAME_MS: 20,          // Twilio sends ~20ms frames
-  RMS_START: 0.06,       // tightened
-  RMS_CONTINUE: 0.045,   // tightened
-  MIN_SPEECH_MS: 350,    // longer to confirm real speech
-  END_SILENCE_MS: 900,   // slightly snappier
+  RMS_START: 0.04,       // was 0.02
+  RMS_CONTINUE: 0.03,    // was 0.015
+  MIN_SPEECH_MS: 200,    // was 80ms
+  END_SILENCE_MS: 1000,
   BARGE_IN_MIN_MS: 150,  // speak ≥150ms to barge-in
   MAX_TURN_DURATION_MS: 6000,
-  MIN_CONSEC_FRAMES: 3,  // NEW: need 3 consecutive frames to start speech
 };
 
 const INSTRUCTIONS =
@@ -255,19 +254,16 @@ wss.on("connection", (twilioWS) => {
   let userSpeechMs = 0;
   let silenceMs = 0;
   let turnMs = 0;
-  let bargeMs = 0;              // continuous speech counter for barge-in
+  let bargeMs = 0;              // NEW: continuous speech counter for barge-in
 
-  let consecAboveStart = 0;     // NEW: start gate counter
   let collectedBytes = 0;       // debug
   let capturedFrames = [];      // store base64 frames for this user turn
 
-  // NEW: one-question gate via transcript
+  // === NEW: one-question gate state ===
   let currentTranscript = "";
   let sawQuestionMark = false;
   let muteAssistantAudio = false;
-
-  // NEW: brief ignore window after greeting (500ms)
-  let postGreetingMuteUntil = 0;
+  let inGreeting = false; // <--- NEW
 
   function resetUserCapture() {
     userSpeechActive = false;
@@ -275,7 +271,6 @@ wss.on("connection", (twilioWS) => {
     silenceMs = 0;
     turnMs = 0;
     bargeMs = 0;
-    consecAboveStart = 0;   // NEW
     collectedBytes = 0;
     capturedFrames = [];
   }
@@ -303,22 +298,13 @@ wss.on("connection", (twilioWS) => {
       return; // <-- do not queue frames while the bot is speaking
     }
 
-    // NEW: small ignore window after greeting completes
-    if (Date.now() < postGreetingMuteUntil) return;
-
     // --- Normal VAD capture path ---
     if (!userSpeechActive) {
       if (level >= VAD.RMS_START) {
-        consecAboveStart += 1;
-        if (consecAboveStart >= VAD.MIN_CONSEC_FRAMES) {
-          userSpeechActive = true;
-          userSpeechMs = VAD.FRAME_MS;
-          silenceMs = 0;
-        } else {
-          return; // wait for stable speech
-        }
+        userSpeechActive = true;
+        userSpeechMs = VAD.FRAME_MS;
+        silenceMs = 0;
       } else {
-        consecAboveStart = 0;
         return; // still idle/noise; do not store audio
       }
     } else {
@@ -358,14 +344,12 @@ wss.on("connection", (twilioWS) => {
         response: {
           modalities: ["audio", "text"],
           conversation: "auto",
-          temperature: 0.2, // NEW
           instructions:
             "If the caller requested a booking and details are complete, call book_appointment; " +
-            "otherwise ask concise follow-ups. Keep it brief and in American English. " +
+            "otherwise ask concise follow-ups. Keep it brief and in American English. " + // note space
             "If the caller provided name, service, start time, and duration, call the tool named `book_appointment` exactly. " +
             "If the caller asks about schedule/availability for a given day, call list_appointments. " +
-            "Do not invent other tool names. " +
-            "Ask exactly ONE question. If the appointment date and time are both missing, ask ONLY: 'What day works for you?' and stop. Wait for the answer. Do NOT ask for time in the same turn.",
+            "Do not invent other tool names.",
         },
       });
       resetUserCapture();
@@ -499,7 +483,7 @@ wss.on("connection", (twilioWS) => {
               required: ["customer_name", "service", "start_iso", "duration_min"],
             },
           },
-          {
+        {
             type: "function",
             name: "list_appointments",
             description: "List Google Calendar events for a specific day (today, tomorrow, or date_iso).",
@@ -528,7 +512,7 @@ wss.on("connection", (twilioWS) => {
     try {
       msg = JSON.parse(data.toString());
     } catch {
-      console.error("[OpenAI] parse error");
+      console.error("[OpenAI] parse error]");
       return;
     }
 
@@ -558,6 +542,7 @@ wss.on("connection", (twilioWS) => {
       return openaiWS._toolCalls[key];
     }
 
+    
     const NOISY_TYPES = new Set([
       "response.audio_transcript.delta",
       "response.output_audio.delta",
@@ -567,9 +552,20 @@ wss.on("connection", (twilioWS) => {
     if (!NOISY_TYPES.has(msg.type)) {
       console.log("[OpenAI EVENT]", msg.type);
     }
+  
+    // ====== AUDIO STREAMING ======
+    if (msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") {
+      isAssistantSpeaking = true;
+      const payload = msg.audio || msg.delta; // base64 μ-law
+      if (!muteAssistantAudio) { // <-- NEW: respect mute during cancel
+        sendMulawToTwilio(payload);
+      }
+      return;
+    }
 
-    // ====== ONE-QUESTION GATE: transcript ======
+    // ====== NEW: transcript stream for one-question gate (skip during greeting) ======
     if (msg.type === "response.audio_transcript.delta") {
+      if (inGreeting) return; // <-- NEW: don't gate the greeting
       currentTranscript += msg.delta || "";
       if (!sawQuestionMark && currentTranscript.includes("?")) {
         sawQuestionMark = true;
@@ -578,23 +574,19 @@ wss.on("connection", (twilioWS) => {
       }
       return;
     }
-  
-    // ====== AUDIO STREAMING ======
-    if (msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") {
-      if (muteAssistantAudio) return; // don't speak beyond first '?'
-      isAssistantSpeaking = true;
-      const payload = msg.audio || msg.delta; // base64 μ-law
-      sendMulawToTwilio(payload);
-      return;
-    }
+
     if (msg.type === "response.audio.done") {
       isAssistantSpeaking = false;
-      // reset gate
-      currentTranscript = "";
-      sawQuestionMark = false;
-      muteAssistantAudio = false;
+      // <-- NEW: reset gate if that audio was the greeting
+      if (inGreeting) {
+        inGreeting = false;
+        currentTranscript = "";
+        sawQuestionMark = false;
+        muteAssistantAudio = false;
+      }
       return;
     }
+
     if (msg.type === "response.done") {
       isAssistantSpeaking = false;
       awaitingResponse = false;
@@ -602,20 +594,18 @@ wss.on("connection", (twilioWS) => {
       if (!userSpeechActive) {
         safeSendOpenAI({ type: "input_audio_buffer.clear" });
       }
-      // reset gate
+      // <-- NEW: extra safety reset
+      inGreeting = false;
       currentTranscript = "";
       sawQuestionMark = false;
       muteAssistantAudio = false;
       return;
     }
+
     if (msg.type === "error") {
       console.error("[OpenAI ERROR]", msg);
       isAssistantSpeaking = false;
       awaitingResponse = false;
-      // reset gate
-      currentTranscript = "";
-      sawQuestionMark = false;
-      muteAssistantAudio = false;
       return;
     }
     
@@ -665,75 +655,78 @@ wss.on("connection", (twilioWS) => {
         response: {
           modalities: ["audio", "text"],
           conversation: "auto",
-          temperature: 0.2, // NEW
           instructions:
             effectiveName === "book_appointment"
-              ? "Confirm the booking with time and service only. Do not ask any follow-up question in this turn; wait for the caller’s reply. Do not mention duration unless asked."
-              : "Summarize the schedule for the requested day. Do not ask any follow-up question in this turn; wait for the caller’s reply.",
+              ? "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative."
+              : "Summarize the schedule for the requested day. If there are no events or an error, say so briefly.",
         },
       });
 
       delete openaiWS._toolCalls[callId];
     }
 
-    // ----- TOOL CALL PLUMBING (unchanged behavior) -----
-    if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
-      const { id: itemId, name, arguments: chunk } = msg.item;
-      console.log("[TOOL START]", name, "call_id=", itemId);
-      const entry = ensureEntry(itemId, name);
-      if (entry && typeof chunk === "string") entry.argsText += chunk;
-      return;
-    }
-    if (msg.type === "response.tool_call.created") {
-      const { id, name, arguments: chunk } = msg.tool_call || {};
-      const entry = ensureEntry(id, name);
-      if (entry && typeof chunk === "string") entry.argsText += chunk;
-      return;
-    }
-    if (msg.type === "response.function_call_arguments.delta") {
-      const { call_id, item_id, name, delta } = msg;
-      if (call_id && item_id) setAlias(item_id, call_id);
-    
-      let hit = getEntryByAnyId({ call_id, item_id, id: msg.id });
-      if (!hit && item_id) hit = { key: item_id, entry: ensureEntry(item_id, name) };
-      if (!hit && call_id) hit = { key: call_id, entry: ensureEntry(call_id, name) };
-      if (hit?.entry && typeof delta === "string") hit.entry.argsText += delta;
-      return;
-    }
-    if (msg.type === "response.tool_call.delta") {
-      const { id, name, arguments: chunk } = msg.tool_call || {};
-      const entry = ensureEntry(id, name);
-      if (entry && typeof chunk === "string") entry.argsText += chunk;
-      return;
-    }
-    if (msg.type === "response.function_call_arguments.done") {
-      const { call_id, item_id, name } = msg;
-      if (call_id && item_id) setAlias(item_id, call_id);
-    
-      let hit = getEntryByAnyId({ call_id, item_id, id: msg.id });
-      if (!hit && item_id) hit = { key: item_id, entry: ensureEntry(item_id, name) };
-      if (!hit && call_id) hit = { key: call_id, entry: ensureEntry(call_id, name) };
-    
-      // migrate entry to call_id if it started under item_id
-      if (hit && call_id && hit.key !== call_id) {
-        openaiWS._toolCalls[call_id] = hit.entry;
-        delete openaiWS._toolCalls[hit.key];
-        setAlias(item_id || hit.key, call_id);
+      // Start/created (either event family)
+      if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
+        const { id: itemId, name, arguments: chunk } = msg.item;
+        console.log("[TOOL START]", name, "call_id=", itemId);
+        const entry = ensureEntry(itemId, name);
+        if (entry && typeof chunk === "string") entry.argsText += chunk;
+        return;
+      }
+      if (msg.type === "response.tool_call.created") {
+        const { id, name, arguments: chunk } = msg.tool_call || {};
+        const entry = ensureEntry(id, name);
+        if (entry && typeof chunk === "string") entry.argsText += chunk;
+        return;
       }
     
-      const effectiveId = call_id || item_id || hit?.key;
-      console.log("[TOOL ARGS DONE] call_id=", effectiveId, "args=", hit?.entry?.argsText);
-      await finishToolCall(effectiveId);
-      return;
-    }
-    if (msg.type === "response.tool_call.completed") {
-      const id = msg.tool_call?.id || msg.call_id;
-      await finishToolCall(id);
-      return;
-    }
-
-    // (Ignore other message types)
-  });
+      // Args streaming (either family)
+      if (msg.type === "response.function_call_arguments.delta") {
+        const { call_id, item_id, name, delta } = msg;
+        if (call_id && item_id) setAlias(item_id, call_id);
+      
+        let hit = getEntryByAnyId({ call_id, item_id, id: msg.id });
+        if (!hit && item_id) hit = { key: item_id, entry: ensureEntry(item_id, name) };
+        if (!hit && call_id) hit = { key: call_id, entry: ensureEntry(call_id, name) };
+        if (hit?.entry && typeof delta === "string") hit.entry.argsText += delta;
+        return;
+      }
+      if (msg.type === "response.tool_call.delta") {
+        const { id, name, arguments: chunk } = msg.tool_call || {};
+        const entry = ensureEntry(id, name);
+        if (entry && typeof chunk === "string") entry.argsText += chunk;
+        return;
+      }
+    
+      // Done/completed (either family)
+      if (msg.type === "response.function_call_arguments.done") {
+        const { call_id, item_id, name } = msg;
+        if (call_id && item_id) setAlias(item_id, call_id);
+      
+        let hit = getEntryByAnyId({ call_id, item_id, id: msg.id });
+        if (!hit && item_id) hit = { key: item_id, entry: ensureEntry(item_id, name) };
+        if (!hit && call_id) hit = { key: call_id, entry: ensureEntry(call_id, name) };
+      
+        // migrate entry to call_id if it started under item_id
+        if (hit && call_id && hit.key !== call_id) {
+          openaiWS._toolCalls[call_id] = hit.entry;
+          delete openaiWS._toolCalls[hit.key];
+          setAlias(item_id || hit.key, call_id);
+        }
+      
+        const effectiveId = call_id || item_id || hit?.key;
+        console.log("[TOOL ARGS DONE] call_id=", effectiveId, "args=", hit?.entry?.argsText);
+        await finishToolCall(effectiveId);
+        return;
+      }
+      if (msg.type === "response.tool_call.completed") {
+        const id = msg.tool_call?.id || msg.call_id;
+        await finishToolCall(id);
+        return;
+      }
+    
+      // (Ignore other message types)
+    });
 
   // ---------- Twilio inbound ----------
   twilioWS.on("message", (raw) => {
@@ -764,10 +757,7 @@ wss.on("connection", (twilioWS) => {
         },
       });
       awaitingResponse = true; // prevent overlapping response.create while greeting plays
-
-      // NEW: start a brief ignore window after greeting (0.5s)
-      postGreetingMuteUntil = Date.now() + 500;
-
+      inGreeting = true;       // <--- NEW
       return;
     }
 
