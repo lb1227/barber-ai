@@ -259,11 +259,15 @@ wss.on("connection", (twilioWS) => {
   let collectedBytes = 0;       // debug
   let capturedFrames = [];      // store base64 frames for this user turn
 
-  // === NEW: one-question gate state ===
+  // --- Transcript gate state (for question-cut control) ---
   let currentTranscript = "";
   let sawQuestionMark = false;
   let muteAssistantAudio = false;
-  let inGreeting = false; // <--- NEW
+  let inGreeting = false;
+
+  // NEW:
+  let firstQIndex = -1;                // index of the first '?' in transcript
+  const POST_Q_CHAR_BUDGET = 80;       // allow ~one short sentence after '?'
 
   function resetUserCapture() {
     userSpeechActive = false;
@@ -336,6 +340,7 @@ wss.on("connection", (twilioWS) => {
         safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
       }
       safeSendOpenAI({ type: "input_audio_buffer.commit" });
+
 
       awaitingResponse = true;
       console.log(`[TURN] committing: ${capturedFrames.length} frames, ${collectedBytes} bytes`);
@@ -512,7 +517,7 @@ wss.on("connection", (twilioWS) => {
     try {
       msg = JSON.parse(data.toString());
     } catch {
-      console.error("[OpenAI] parse error]");
+      console.error("[OpenAI] parse error");
       return;
     }
 
@@ -552,41 +557,55 @@ wss.on("connection", (twilioWS) => {
     if (!NOISY_TYPES.has(msg.type)) {
       console.log("[OpenAI EVENT]", msg.type);
     }
-  
-    // ====== AUDIO STREAMING ======
-    if (msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") {
-      isAssistantSpeaking = true;
-      const payload = msg.audio || msg.delta; // base64 μ-law
-      if (!muteAssistantAudio) { // <-- NEW: respect mute during cancel
-        sendMulawToTwilio(payload);
-      }
-      return;
-    }
 
-    // ====== NEW: transcript stream for one-question gate (skip during greeting) ======
+    // ====== TRANSCRIPT GATE (lets first question finish) ======
     if (msg.type === "response.audio_transcript.delta") {
-      if (inGreeting) return; // <-- NEW: don't gate the greeting
-      currentTranscript += msg.delta || "";
-      if (!sawQuestionMark && currentTranscript.includes("?")) {
-        sawQuestionMark = true;
+      if (inGreeting) return; // don't gate the greeting
+      const delta = msg.delta || "";
+      if (!delta) return;
+
+      currentTranscript += delta;
+
+      const qCount = (currentTranscript.match(/\?/g) || []).length;
+
+      // Record the first '?' position but do NOT cancel yet
+      if (firstQIndex === -1) {
+        const idx = currentTranscript.indexOf("?");
+        if (idx !== -1) {
+          firstQIndex = idx;
+          sawQuestionMark = true;
+        }
+        return;
+      }
+
+      // After the first '?', allow a short tail; cancel on second '?' or long ramble
+      const charsAfterFirstQ = currentTranscript.length - firstQIndex - 1;
+      if (qCount >= 2 || charsAfterFirstQ > POST_Q_CHAR_BUDGET) {
         muteAssistantAudio = true;
         safeSendOpenAI({ type: "response.cancel" });
       }
       return;
     }
-
-    if (msg.type === "response.audio.done") {
-      isAssistantSpeaking = false;
-      // <-- NEW: reset gate if that audio was the greeting
-      if (inGreeting) {
-        inGreeting = false;
-        currentTranscript = "";
-        sawQuestionMark = false;
-        muteAssistantAudio = false;
-      }
+  
+    // ====== AUDIO STREAMING ======
+    if (msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") {
+      isAssistantSpeaking = true;
+      const payload = msg.audio || msg.delta; // base64 μ-law
+      sendMulawToTwilio(payload);
       return;
     }
+    if (msg.type === "response.audio.done") {
+      isAssistantSpeaking = false;
 
+      // reset transcript gate on audio completion
+      inGreeting = false;
+      currentTranscript = "";
+      sawQuestionMark = false;
+      firstQIndex = -1;
+      muteAssistantAudio = false;
+
+      return;
+    }
     if (msg.type === "response.done") {
       isAssistantSpeaking = false;
       awaitingResponse = false;
@@ -594,14 +613,16 @@ wss.on("connection", (twilioWS) => {
       if (!userSpeechActive) {
         safeSendOpenAI({ type: "input_audio_buffer.clear" });
       }
-      // <-- NEW: extra safety reset
+
+      // extra safety reset
       inGreeting = false;
       currentTranscript = "";
       sawQuestionMark = false;
+      firstQIndex = -1;
       muteAssistantAudio = false;
+
       return;
     }
-
     if (msg.type === "error") {
       console.error("[OpenAI ERROR]", msg);
       isAssistantSpeaking = false;
@@ -616,55 +637,57 @@ wss.on("connection", (twilioWS) => {
       return !!(args && (args.day || args.date_iso));
     }
 
-    async function finishToolCall(callId) {
-      const entry = openaiWS._toolCalls[callId];
-      if (!callId || !entry) return;
+async function finishToolCall(callId) {
+  const entry = openaiWS._toolCalls[callId];
+  if (!callId || !entry) return;
 
-      const args = parseToolArgs(entry.argsText || "{}");
-      const rawName = (entry.name || "").toLowerCase();
-      const effectiveName =
-        rawName ||
-        (isBookingArgs(args) ? "book_appointment" : isListArgs(args) ? "list_appointments" : "");
-      
-      console.log("[TOOL NAME]", effectiveName || "(missing)", "args=", args);
+  const args = parseToolArgs(entry.argsText || "{}");
+  const rawName = (entry.name || "").toLowerCase();
+  const effectiveName =
+    rawName ||
+    (isBookingArgs(args) ? "book_appointment" : isListArgs(args) ? "list_appointments" : "");
+  
+  console.log("[TOOL NAME]", effectiveName || "(missing)", "args=", args);
 
-      let result = { ok: false, error: "Unknown tool" };
+  let result = { ok: false, error: "Unknown tool" };
 
-      if (effectiveName === "book_appointment") {
-        result = await handleBookAppointment(args);
-      } else if (effectiveName === "list_appointments") {
-        result = await handleListAppointments(args);
-      } else {
-        console.log("[TOOL ROUTING] Unknown tool name:", rawName, "args=", args);
-      }
+  if (effectiveName === "book_appointment") {
+    result = await handleBookAppointment(args);
+  } else if (effectiveName === "list_appointments") {
+    result = await handleListAppointments(args);
+  } else {
+    console.log("[TOOL ROUTING] Unknown tool name:", rawName, "args=", args);
+  }
 
-      // Return output to the model
-      safeSendOpenAI({
-        type: "conversation.item.create",
-        item: {
-          type: "function_call_output",
-          call_id: callId,
-          output: JSON.stringify(result),
-        },
-      });
+  // Return output to the model
+  safeSendOpenAI({
+    type: "conversation.item.create",
+    item: {
+      type: "function_call_output",
+      call_id: callId,
+      output: JSON.stringify(result),
+    },
+  });
 
-      // Speak confirmation/answer
-      if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
-      safeSendOpenAI({
-        type: "response.create",
-        response: {
-          modalities: ["audio", "text"],
-          conversation: "auto",
-          instructions:
-            effectiveName === "book_appointment"
-              ? "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative."
-              : "Summarize the schedule for the requested day. If there are no events or an error, say so briefly.",
-        },
-      });
+  // Speak confirmation/answer
+  if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
+  safeSendOpenAI({
+    type: "response.create",
+    response: {
+      modalities: ["audio", "text"],
+      conversation: "auto",
+      instructions:
+        effectiveName === "book_appointment"
+          ? "Confirm the booking with time and service. If it failed, explain the reason and propose an alternative."
+          : "Summarize the schedule for the requested day. If there are no events or an error, say so briefly.",
+    },
+  });
 
-      delete openaiWS._toolCalls[callId];
-    }
+  delete openaiWS._toolCalls[callId];
+}
 
+
+    
       // Start/created (either event family)
       if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
         const { id: itemId, name, arguments: chunk } = msg.item;
@@ -757,7 +780,6 @@ wss.on("connection", (twilioWS) => {
         },
       });
       awaitingResponse = true; // prevent overlapping response.create while greeting plays
-      inGreeting = true;       // <--- NEW
       return;
     }
 
