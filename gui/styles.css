@@ -1,6 +1,0 @@
-body { font-family: system-ui, sans-serif; margin: 24px; color:#111 }
-header { margin-bottom: 16px }
-.card { border:1px solid #ddd; border-radius:12px; padding:16px; margin:12px 0 }
-button { padding:8px 12px; margin:4px; cursor:pointer }
-input { padding:8px; margin:4px; min-width:240px }
-pre { background:#fafafa; padding:12px; border-radius:8px; overflow:auto }
