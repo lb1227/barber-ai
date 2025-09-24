@@ -206,6 +206,11 @@ const VAD = {
 };
 const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
 
+// NEW: post-greeting and first-turn guards
+const POST_GREETING_COOLDOWN_MS = 700; // ignore audio right after greeting
+const MIN_AVG_RMS_FIRST = 0.040;       // stronger loudness required for 1st caller turn
+const MIN_SPEECH_MS_FIRST = 320;       // longer speech needed for 1st caller turn
+
 // === Business facts (mention only if asked) ===
 const BUSINESS_FACTS =
 [
@@ -238,6 +243,7 @@ const INSTRUCTIONS =
     "- Formality: **casual but slightly professional** (it’s a business).",
     "- Emotion: **appropriately expressive** and empathetic within normal workplace standards.",
     "- Pacing: **slightly brisk**. Keep replies short (≈8–14 words) and avoid long monologues.",
+    "- Avoid filler transitions like “great”, “awesome”, “perfect”, “okay/ok”, “alright”, or “so”. Start the question directly.",
     "",
     "# Single-question policy (STRICT)",
     "- **Ask for exactly one field per turn**. Never combine fields in one question.",
@@ -327,6 +333,10 @@ wss.on("connection", (twilioWS) => {
 
   // Track assistant's text to guard against double-questions
   let assistantUtterance = "";
+
+  // NEW: post-greeting & first turn tracking
+  let postGreetingUntilTs = 0;
+  let firstTurn = true;
 
   function resetUserCapture() {
     userSpeechActive = false;
@@ -421,6 +431,9 @@ wss.on("connection", (twilioWS) => {
   }
 
   function appendUserAudio(b64) {
+    // NEW: ignore any frames during the short post-greeting cooldown
+    if (Date.now() < postGreetingUntilTs) return;
+
     if (greetingInFlight) return;
 
     const level = rmsOfMuLawBase64(b64);
@@ -465,7 +478,10 @@ wss.on("connection", (twilioWS) => {
     sumLevel += level;
     levelCount += 1;
 
-    const utteranceLongEnough = userSpeechMs >= VAD.MIN_SPEECH_MS;
+    // NEW: first-turn thresholds
+    const minSpeechMs = firstTurn ? MIN_SPEECH_MS_FIRST : VAD.MIN_SPEECH_MS;
+    const utteranceLongEnough = userSpeechMs >= minSpeechMs;
+
     const endedBySilence = silenceMs >= VAD.END_SILENCE_MS;
     const endedByTimeout = turnMs >= VAD.MAX_TURN_DURATION_MS;
 
@@ -476,7 +492,8 @@ wss.on("connection", (twilioWS) => {
       }
 
       const avgLevel = levelCount ? (sumLevel / levelCount) : 0;
-      if (avgLevel < MIN_AVG_RMS) {
+      const minAvg = firstTurn ? MIN_AVG_RMS_FIRST : MIN_AVG_RMS;
+      if (avgLevel < minAvg) {
         resetUserCapture();
         return;
       }
@@ -493,10 +510,11 @@ wss.on("connection", (twilioWS) => {
         response: {
           modalities: ["audio", "text"],
           conversation: "auto",
-          // Strong single-question directive every turn
+          // Strong single-question directive every turn (+ no fillers)
           instructions:
             "Stay warm, slightly upbeat, and brief. Ask for **exactly ONE field** now in order: name → service → phone → date & time. " +
             "Do **not** combine fields. The only allowed 'and' is **'date and time'** once in a single question. " +
+            "Avoid fillers—start directly with the question (e.g., 'What’s your name?'). " +
             "If the caller provided all required info (name, service, phone, date & time), call `book_appointment`. " +
             "If they ask about availability, call `list_appointments`. " +
             "For rescheduling/canceling, confirm name and the date/time to change, then proceed. " +
@@ -504,6 +522,10 @@ wss.on("connection", (twilioWS) => {
             "Only mention prices/services/areas if the caller asks.",
         },
       });
+
+      // NEW: after first assistant reply, further turns use normal thresholds
+      firstTurn = false;
+
       resetUserCapture();
     }
   }
@@ -641,7 +663,7 @@ wss.on("connection", (twilioWS) => {
       },
     });
 
-    // ✅ Correctly flush queued items (fixes greeting silence)
+    // Correctly flush queued items
     while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
   });
 
@@ -691,7 +713,11 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
       assistantUtterance = "";
-      if (greetingInFlight) greetingInFlight = false;
+      if (greetingInFlight) {
+        greetingInFlight = false;
+        // NEW: start post-greeting cooldown to avoid immediate follow-up
+        postGreetingUntilTs = Date.now() + POST_GREETING_COOLDOWN_MS;
+      }
       if (!userSpeechActive) {
         safeSendOpenAI({ type: "input_audio_buffer.clear" });
       }
