@@ -268,6 +268,14 @@ slotLenSel.value = String(state.slotLen);
 startHour.value = state.start;
 endHour.value   = state.end;
 
+/* ---------- 12hr time ---------- */
+  function formatTime12h(hours, minutes = 0) {
+    const ampm = hours >= 12 ? "PM" : "AM";
+    let h = hours % 12;
+    if (h === 0) h = 12;
+    const m = minutes.toString().padStart(2, "0");
+    return `${h}:${m} ${ampm}`;
+  }
 /* ---------- Week view rendering ---------- */
 function renderWeek(){
   const slot = Number(state.slotLen);
@@ -364,7 +372,7 @@ function renderWeek(){
       // tiny label at :00 only
       if (minutes===0){
         const tag = document.createElement('div'); tag.className="tag";
-        tag.textContent = `${pad(hours)}:00`;
+        tag.textContent = formatTime12h(hours, minutes);
         cell.appendChild(tag);
       }
 
