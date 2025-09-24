@@ -56,8 +56,9 @@
   /* WEEK GRID */
   .week-wrap{overflow:auto}
   .week{
-    display:grid;grid-template-columns:70px repeat(7,1fr);min-width:880px;
+    display:grid;grid-template-columns:70px repeat(7,1fr);min-width:880px;grid-auto-flow: row;
   }
+
   .day-head,.time-cell{
     background:#131722;border-bottom:1px solid #1f2436;position:sticky;top:0;z-index:2;
   }
@@ -106,42 +107,107 @@
   textarea#import{
     width:100%;min-height:120px;background:#0e1220;border:1px solid #243054;color:#e6edff;border-radius:10px;padding:10px
   }
+  .month-dow{
+  display:grid;
+  grid-template-columns:repeat(7,1fr);
+  border-left:1px solid #22263b;
+  border-top:1px solid #22263b;
+  background:#131722;
+}
+.month-dow div{
+  text-align:center;
+  padding:8px 0;
+  font-weight:600;
+  color:var(--muted);
+  border-right:1px solid #22263b;
+  border-bottom:1px solid #22263b;
+}
+  /* === App shell (sidebar + content) === */
+.app{
+  display:grid;
+  grid-template-columns: 240px 1fr;
+  min-height:100vh;
+}
+@media (max-width: 960px){
+  .app{ grid-template-columns: 1fr; }
+  .sidebar{ position:sticky; top:0; z-index:5; }
+}
+
+.sidebar{
+  background:#0c0f16;
+  border-right:1px solid #1d2234;
+  padding:14px 12px;
+}
+.brand{
+  display:flex; align-items:center; gap:10px;
+  padding:8px 10px; margin-bottom:10px; color:var(--text);
+}
+.brand .logo{ font-size:20px; }
+
+.nav{ display:flex; flex-direction:column; gap:6px; }
+.nav-item{
+  text-align:left; border:none; cursor:pointer;
+  background:transparent; color:#cfd6ea;
+  padding:10px 12px; border-radius:10px; font-weight:600;
+}
+.nav-item:hover{ background:#151a24; }
+.nav-item.active{ background:#1b2240; color:#fff; box-shadow:inset 0 0 0 1px #2e4aa3; }
+
+/* The top header you already have should stick as before when inside .app-content */
 </style>
 </head>
 <body>
 
-<header>
-  <h1>Barber AI – Scheduling Controls</h1>
-  <div class="row">
-    <div class="ctrl">
-      <label>Slot length</label>
-      <select id="slotLen">
-        <option value="15">15 min</option>
-        <option value="20">20 min</option>
-        <option value="30" selected>30 min</option>
-        <option value="60">60 min</option>
-      </select>
+  <div class="app">
+  <aside class="sidebar">
+    <div class="brand">
+      <span class="logo">💈</span>
+      <strong>Barber AI</strong>
     </div>
-    <div class="ctrl">
-      <label>Business hours</label>
-      <div class="row" style="gap:6px">
-        <input id="startHour" type="time" value="09:00">
-        <input id="endHour" type="time" value="18:00">
-      </div>
-    </div>
-    <div class="row">
-      <button class="secondary" id="prevWeekBtn">◀ Prev Week</button>
-      <button class="secondary" id="nextWeekBtn">Next Week ▶</button>
-      <button id="resetWeekBtn">Clear Week</button>
-    </div>
-    <div class="row">
-      <button class="secondary" id="exportBtn" title="Copy JSON">Export</button>
-      <button class="secondary" id="showImport">Import</button>
-    </div>
-  </div>
-</header>
+    <nav class="nav">
+      <button class="nav-item active" data-view="scheduling">Scheduling</button>
+      <button class="nav-item" data-view="greeting">Greeting</button>
+      <button class="nav-item" data-view="advanced">Advanced</button>
+      <button class="nav-item" data-view="logs">Logs</button>
+    </nav>
+  </aside>
+
+  <div class="app-content">
 
 <main>
+  <section class="view" data-view="scheduling">
+
+<header>
+    <h1>Barber AI – Scheduling Controls</h1>
+    <div class="row">
+      <div class="ctrl">
+        <label>Slot length</label>
+        <select id="slotLen">
+          <option value="15">15 min</option>
+          <option value="20">20 min</option>
+          <option value="30" selected>30 min</option>
+          <option value="60">60 min</option>
+        </select>
+      </div>
+      <div class="ctrl">
+        <label>Business hours</label>
+        <div class="row" style="gap:6px">
+          <input id="startHour" type="time" value="09:00">
+          <input id="endHour" type="time" value="18:00">
+        </div>
+      </div>
+      <div class="row">
+        <button class="secondary" id="prevWeekBtn">◀ Prev Week</button>
+        <button class="secondary" id="nextWeekBtn">Next Week ▶</button>
+        <button id="resetWeekBtn">Clear Week</button>
+      </div>
+      <div class="row">
+        <button class="secondary" id="exportBtn" title="Copy JSON">Export</button>
+        <button class="secondary" id="showImport">Import</button>
+      </div>
+    </div>
+  </header>
+    
   <!-- WEEK SCHEDULER -->
   <section class="card">
     <header>
@@ -171,16 +237,50 @@
       </div>
     </header>
     <div style="padding:8px 12px;color:var(--muted)">Click any day to toggle a full-day blackout (no bookings).</div>
+    <div id="monthDow" class="month-dow"></div>
     <div id="month" class="month-grid"></div>
   </section>
+  <div class="inline-actions">
+    <button id="todayBtn" class="secondary">Jump to Today</button>
+  </div>
+    
+ </section>
+  <section class="view" data-view="greeting" hidden>
+  <section class="card">
+    <header><h2>Greeting</h2></header>
+    <div style="padding:14px">
+      <p class="hint">Customize what the bot says when it answers.</p>
+      <div style="display:flex; gap:10px; margin-top:8px;">
+        <input id="greetingInput2" type="text" style="flex:1"
+               placeholder="Hello, thank you for calling the barbershop! How can I help you today.">
+        <button id="saveGreeting2">Save</button>
+      </div>
+    </div>
+  </section>
+</section>
+
+<section class="view" data-view="advanced" hidden>
+  <section class="card">
+    <header><h2>Advanced Features</h2></header>
+    <div style="padding:14px">
+      <p class="hint">Add things like “Temporary disable”, “Time controls”, or “Extension digits”.</p>
+    </div>
+  </section>
+</section>
+
+<section class="view" data-view="logs" hidden>
+  <section class="card">
+    <header><h2>Logs</h2></header>
+    <div style="padding:14px">
+      <p class="hint">Space for call logs or recent actions.</p>
+    </div>
+  </section>
+</section>
 </main>
 
 <footer>
   <div>
     <div class="hint">Data auto-saves in your browser. Use Export/Import to move it to another device or send to your backend.</div>
-  </div>
-  <div class="inline-actions">
-    <button id="todayBtn" class="secondary">Jump to Today</button>
   </div>
 </footer>
 
@@ -200,8 +300,11 @@ const pad = n => String(n).padStart(2,'0');
 function minutesBetween(a,b){ return Math.max(0, Math.round((b-a)/60000)); }
 function addMinutes(date, m){ return new Date(date.getTime()+m*60000); }
 function weekStart(d){
-  const x=new Date(d); const day=(x.getDay()+6)%7; // Mon=0
-  x.setHours(0,0,0,0); x.setDate(x.getDate()-day); return x;
+  const x = new Date(d);
+  const day = x.getDay();      // Sun=0, Mon=1, ... Sat=6
+  x.setHours(0,0,0,0);
+  x.setDate(x.getDate() - day); // back to Sunday
+  return x;
 }
 function clone(d){ return new Date(d.getTime()); }
 function tzLocalISO(date){ // yyyy-mm-ddTHH:MM (local)
@@ -221,7 +324,9 @@ let state = {
   blackoutDays: {},
   // cursors
   weekCursor: weekStart(new Date()),
-  monthCursor: new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+  monthCursor: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
+
+  greeting: "Hello, thank you for calling the barbershop! How can I help you today."
 };
 function save(){ localStorage.setItem(storeKey, JSON.stringify(state)); }
 function load(){
@@ -234,7 +339,8 @@ function load(){
       ...state,
       ...s,
       weekCursor: s.weekCursor ? new Date(s.weekCursor) : state.weekCursor,
-      monthCursor: s.monthCursor ? new Date(s.monthCursor) : state.monthCursor
+      monthCursor: s.monthCursor ? new Date(s.monthCursor) : state.monthCursor,
+      greeting: typeof s.greeting === "string" ? s.greeting : state.greeting
     };
   }catch{}
 }
@@ -263,19 +369,39 @@ const importTxt = document.getElementById('import');
 const doImport = document.getElementById('doImport');
 const cancelImport = document.getElementById('cancelImport');
 
+
+  /* === Left-nav view router === */
+function showView(name){
+  document.querySelectorAll('.nav-item').forEach(b=>{
+    b.classList.toggle('active', b.dataset.view === name);
+  });
+  document.querySelectorAll('.view').forEach(v=>{
+    v.hidden = v.dataset.view !== name;
+  });
+  // optional: location.hash = name;
+}
+document.querySelectorAll('.nav-item').forEach(b=>{
+  b.addEventListener('click', ()=> showView(b.dataset.view));
+});
+
+// Initial view (hash or default)
+showView((location.hash && location.hash.slice(1)) || 'scheduling');
+window.addEventListener('hashchange', ()=> showView(location.hash.slice(1) || 'scheduling'));
+
 /* ---------- Init controls ---------- */
 slotLenSel.value = String(state.slotLen);
 startHour.value = state.start;
 endHour.value   = state.end;
 
 /* ---------- 12hr time ---------- */
-  function formatTime12h(hours, minutes = 0) {
-    const ampm = hours >= 12 ? "PM" : "AM";
-    let h = hours % 12;
-    if (h === 0) h = 12;
-    const m = minutes.toString().padStart(2, "0");
-    return `${h}:${m} ${ampm}`;
-  }
+function formatTime12h(hours, minutes = 0) {
+  const ampm = hours >= 12 ? "PM" : "AM";
+  let h = hours % 12;
+  if (h === 0) h = 12;
+  const m = minutes.toString().padStart(2, "0");
+  return `${h}:${m} ${ampm}`;
+}
+
 /* ---------- Week view rendering ---------- */
 function renderWeek(){
   const slot = Number(state.slotLen);
@@ -289,20 +415,31 @@ function renderWeek(){
   const rows = Math.ceil((endMins-startMins)/slot);
   const days = Array.from({length:7},(_,i)=> addMinutes(state.weekCursor, i*24*60));
   weekEl.innerHTML = "";
+  weekEl.style.gridTemplateRows = `40px repeat(${rows}, 20px)`;
+  
 
-  // headers
-  const headRow = document.createElement('div'); headRow.className="day-head time-cell";
-  headRow.style.gridColumn = "1 / span 1";
-  const timeCol = document.createElement('div'); timeCol.className="time-col";
-  // time labels column
-  const timeLabels = document.createElement('div'); timeLabels.style.display="grid";
+  // top-left header spacer
+  const topLeft = document.createElement('div');
+  topLeft.className = "day-head time-cell";
+  topLeft.style.gridColumn = "1";
+  topLeft.style.gridRow = "1";
+  weekEl.appendChild(topLeft);
+
+  // time column (sticks on the left, spans all rows beneath headers)
+  const timeCol = document.createElement('div');
+  timeCol.className = "time-col";
+  timeCol.style.gridColumn = "1";
+  timeCol.style.gridRow = `2 / span ${rows}`; 
+
+  const timeLabels = document.createElement('div');
+  timeLabels.style.display = "grid";
   timeLabels.style.gridAutoRows = "20px";
   for(let r=0;r<rows;r++){
     const t = startMins + r*slot;
     if (t % 60 === 0) {
       const lab = document.createElement('div');
       lab.className="time-label";
-      lab.textContent = `${pad(Math.floor(t/60))}:00`;
+      lab.textContent = formatTime12h(Math.floor(t/60), 0);
       timeLabels.appendChild(lab);
     } else {
       const spacer = document.createElement('div');
@@ -311,25 +448,25 @@ function renderWeek(){
       timeLabels.appendChild(spacer);
     }
   }
-  weekEl.appendChild(timeCol);
   timeCol.appendChild(timeLabels);
+  weekEl.appendChild(timeCol);
 
   // day headers
-  const dowNames = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+  const dowNames = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
   days.forEach((d,idx)=>{
     const h = document.createElement('div');
     h.className = "day-head";
-    const dateStr = fmtDate(d);
     const disp = d.toLocaleDateString(undefined,{month:'short', day:'numeric'});
     h.innerHTML = `<div class="dow">${dowNames[idx]}</div><div class="date">${disp}</div>`;
     h.style.gridColumn = String(idx+2);
+    h.style.gridRow = "1";
     weekEl.appendChild(h);
   });
 
-  // slots
+  // slots (7 day columns)
   let isDragging = false;
   let dragMode = null; // true => activating, false => deactivating
-
+  
   const onDown = (e, dateStr, timeStr, cell) => {
     if (state.blackoutDays[dateStr]) return;
     isDragging = true;
@@ -345,41 +482,42 @@ function renderWeek(){
     cell.classList.toggle('active', dragMode);
   };
   const onUp = ()=>{ isDragging=false; dragMode=null; save(); };
-
   document.addEventListener('mouseup', onUp, { once:false });
-
-  // build grid
-  for(let r=0;r<rows;r++){
-    const mins = startMins + r*slot;
-    // time column cell spacing already built
-    days.forEach((d)=>{
-      const dateStr = fmtDate(d);
-      const hours = Math.floor(mins/60), minutes = mins%60;
+  
+  // ✅ Create ONE column per day, then fill it with row cells
+  days.forEach((d, dayIdx) => {
+    const dateStr = fmtDate(d);
+    const col = document.createElement('div');
+    col.className = "slots";
+    col.style.gridColumn = String(dayIdx + 2); // col 1 is the time labels
+    col.style.gridRow = `2 / span ${rows}`;             // span all time rows
+  
+    for (let r = 0; r < rows; r++) {
+      const mins = startMins + r * slot;
+      const hours = Math.floor(mins / 60), minutes = mins % 60;
       const timeStr = `${pad(hours)}:${pad(minutes)}`;
-      const col = document.createElement('div'); col.className="slots";
-      col.style.gridColumn = "span 1";
+  
       const cell = document.createElement('div');
       cell.className = "slot";
+  
       if (state.blackoutDays[dateStr]) cell.classList.add('blocked');
-
-      // reflect state
       if (state.availability?.[dateStr]?.[timeStr]) cell.classList.add('active');
-
-      // events
+  
       cell.addEventListener('mousedown', (e)=>onDown(e,dateStr,timeStr,cell));
       cell.addEventListener('mouseenter', (e)=>onOver(e,dateStr,timeStr,cell));
-
-      // tiny label at :00 only
-      if (minutes===0){
-        const tag = document.createElement('div'); tag.className="tag";
-        tag.textContent = formatTime12h(hours, minutes);
+  
+      if (minutes === 0) {
+        const tag = document.createElement('div');
+        tag.className = "tag";
+        tag.textContent = formatTime12h(hours, minutes); // 12h labels
         cell.appendChild(tag);
       }
-
+  
       col.appendChild(cell);
-      weekEl.appendChild(col);
-    });
-  }
+    }
+  
+    weekEl.appendChild(col);
+  });
 }
 
 function toggleSlot(dateStr, timeStr, on){
@@ -396,11 +534,19 @@ function renderMonth(){
   const y = cur.getFullYear();
   const m = cur.getMonth();
   const first = new Date(y,m,1);
-  const last  = new Date(y,m+1,0);
   monTitle.textContent = first.toLocaleString(undefined,{month:'long', year:'numeric'});
 
+  // draw weekday header (Mon–Sun to match Monday-start grid)
+  const dowHdr = document.getElementById('monthDow');
+  dowHdr.innerHTML = "";
+  ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].forEach(txt=>{
+    const d = document.createElement('div');
+    d.textContent = txt;
+    dowHdr.appendChild(d);
+  });
+
   // start on Monday
-  const startOffset = ( (first.getDay()+6)%7 );
+  const startOffset = first.getDay();
   const startCellDate = new Date(y,m,1 - startOffset);
   const totalCells = 42; // 6 weeks grid
 
@@ -451,7 +597,7 @@ prevWeekBtn.addEventListener('click', ()=>{
 nextWeekBtn.addEventListener('click', ()=>{
   state.weekCursor = addMinutes(state.weekCursor, 7*24*60); save(); renderWeek();
 });
-todayBtn.addEventListener('click', ()=>{
+ todayBtn.addEventListener('click', ()=>{
   state.weekCursor = weekStart(new Date()); state.monthCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
   save(); renderWeek(); renderMonth();
 });
@@ -467,6 +613,7 @@ clearBlackouts.addEventListener('click', ()=>{
   state.blackoutDays = {};
   save(); renderMonth(); renderWeek();
 });
+
 
 /* ---------- Export / Import ---------- */
 exportBtn.addEventListener('click', ()=>{
@@ -503,6 +650,14 @@ doImport.addEventListener('click', ()=>{
 renderWeek();
 renderMonth();
 
+/* ---------- Sanity checks (light tests in console) ---------- */
+(function runSanity(){
+  const cols = document.querySelectorAll('#week .slots').length;
+  console.assert(cols === 7, `Expected 7 day columns, got ${cols}`);
+  const heads = document.querySelectorAll('#week .day-head').length;
+  console.assert(heads === 8, `Expected 8 headers (including top-left), got ${heads}`);
+})();
+
 /* ---------- Public API (future backend hook) ----------
 window.getSchedulePayload = () => ({
   slotLen: state.slotLen,
@@ -513,5 +668,7 @@ window.getSchedulePayload = () => ({
 });
 ------------------------------------------------------ */
 </script>
+    </div> <!-- /.app-content -->
+</div>   <!-- /.app -->
 </body>
 </html>
