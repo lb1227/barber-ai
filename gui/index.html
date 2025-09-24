@@ -1,228 +1,43 @@
 <!doctype html>
-<html lang="en">
+<html>
 <head>
   <meta charset="utf-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Barber AI Control Panel</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Barber AI — Admin</title>
+  <link rel="stylesheet" href="styles.css" />
 </head>
-<body class="bg-slate-50 text-slate-900">
-  <div class="max-w-5xl mx-auto p-6 space-y-6">
-    <header class="flex items-center justify-between">
-      <h1 class="text-2xl font-bold">Barber AI Control Panel</h1>
-      <span class="text-sm text-slate-500">Static GUI for GitHub Pages</span>
-    </header>
+<body>
+  <header><h1>Barber AI Admin</h1></header>
 
-    <!-- Config Card -->
-    <section class="bg-white rounded-2xl shadow p-5 space-y-4">
-      <h2 class="text-lg font-semibold">1) Server Config</h2>
-      <p class="text-sm text-slate-600">Enter your deployed server base URL (Render, Fly, etc.). Example: <code>https://barber-ai.onrender.com</code></p>
-      <div class="grid sm:grid-cols-2 gap-3">
-        <label class="block">
-          <span class="text-sm">Server Base URL</span>
-          <input id="baseUrl" class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" placeholder="https://your-domain.com" />
-        </label>
-        <label class="block">
-          <span class="text-sm">Twilio Voice Webhook (read-only)</span>
-          <input id="voiceUrl" class="mt-1 w-full rounded-xl border border-slate-200 px-3 py-2 bg-slate-100" readonly />
-        </label>
-      </div>
-      <div class="flex gap-3">
-        <button id="saveCfg" class="px-4 py-2 rounded-xl bg-slate-900 text-white">Save</button>
-        <button id="pingHealth" class="px-4 py-2 rounded-xl border">Health Check</button>
-        <span id="healthBadge" class="ml-2 text-sm"></span>
-      </div>
-    </section>
+  <section class="card">
+    <h2>Google Calendar</h2>
+    <button id="btnConnect">Connect Google</button>
+    <button id="btnMe">Who am I?</button>
+    <button id="btnToday">Today’s Events</button>
+    <div id="me"></div>
+    <pre id="events"></pre>
+  </section>
 
-    <!-- Google Auth Card -->
-    <section class="bg-white rounded-2xl shadow p-5 space-y-4">
-      <h2 class="text-lg font-semibold">2) Google Calendar</h2>
-      <p class="text-sm text-slate-600">Connect your Google account on the server, then verify identity and tokens.</p>
-      <div class="flex flex-wrap gap-3">
-        <button id="connectGoogle" class="px-4 py-2 rounded-xl bg-emerald-600 text-white">Connect Google</button>
-        <button id="whoAmI" class="px-4 py-2 rounded-xl border">Who am I?</button>
-        <button id="listToday" class="px-4 py-2 rounded-xl border">List Today</button>
-        <button id="listTomorrow" class="px-4 py-2 rounded-xl border">List Tomorrow</button>
-      </div>
-      <pre id="authOut" class="text-xs bg-slate-50 border rounded-xl p-3 overflow-auto"></pre>
-    </section>
+  <section class="card">
+    <h2>Check a Day</h2>
+    <input id="date" type="date"/>
+    <button id="btnCheckDate">Check</button>
+    <pre id="dayEvents"></pre>
+  </section>
 
-    <!-- Quick Create Event Card -->
-    <section class="bg-white rounded-2xl shadow p-5 space-y-4">
-      <h2 class="text-lg font-semibold">3) Quick Create Calendar Event</h2>
-      <div class="grid sm:grid-cols-2 gap-3">
-        <label class="block">
-          <span class="text-sm">Summary</span>
-          <input id="qSummary" class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" placeholder="Haircut — Alex" />
-        </label>
-        <label class="block">
-          <span class="text-sm">Start (your local time)</span>
-          <input id="qStart" type="datetime-local" class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" />
-        </label>
-        <label class="block">
-          <span class="text-sm">Duration (min)</span>
-          <input id="qDur" type="number" class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" value="30" />
-        </label>
-        <label class="block">
-          <span class="text-sm">Attendees (comma emails, optional)</span>
-          <input id="qAtt" class="mt-1 w-full rounded-xl border border-slate-300 px-3 py-2" placeholder="a@ex.com,b@ex.com" />
-        </label>
-      </div>
-      <div class="flex gap-3">
-        <button id="createEvent" class="px-4 py-2 rounded-xl bg-blue-600 text-white">Create Event</button>
-        <span class="text-sm text-slate-500">Uses <code>/gcal/create</code> on your server.</span>
-      </div>
-      <pre id="createOut" class="text-xs bg-slate-50 border rounded-xl p-3 overflow-auto"></pre>
-    </section>
+  <section class="card">
+    <h2>Quick Book</h2>
+    <form id="bookForm">
+      <input name="customer_name" placeholder="Name" required />
+      <input name="phone" placeholder="Phone" />
+      <input name="service" placeholder="Service" required />
+      <input name="start_iso" placeholder="Start (YYYY-MM-DDTHH:mm-04:00)" required />
+      <input name="duration_min" type="number" value="30" min="5" />
+      <button type="submit">Book</button>
+    </form>
+    <pre id="bookResult"></pre>
+  </section>
 
-    <!-- Logs / Output -->
-    <section class="bg-white rounded-2xl shadow p-5 space-y-2">
-      <h2 class="text-lg font-semibold">Output</h2>
-      <pre id="log" class="text-xs bg-slate-50 border rounded-xl p-3 h-64 overflow-auto"></pre>
-    </section>
-
-    <footer class="text-center text-xs text-slate-500 py-6">© Barber AI</footer>
-  </div>
-
-<script>
-(function() {
-  const $ = (id) => document.getElementById(id);
-
-  // Persist base URL in localStorage
-  const KEY = 'barberai.baseUrl';
-  const defaultUrl = localStorage.getItem(KEY) || '';
-  $('baseUrl').value = defaultUrl;
-  updateVoiceUrl(defaultUrl);
-
-  function updateVoiceUrl(base) {
-    const voice = base ? base.replace(/^http/,'wss') + '/media' : '';
-    $('voiceUrl').value = voice;
-  }
-
-  function setHealth(ok, text) {
-    const el = $('healthBadge');
-    el.textContent = ok ? 'Server OK' : 'Server error';
-    el.className = ok ? 'ml-2 text-sm text-emerald-700' : 'ml-2 text-sm text-rose-700';
-    if (text) appendLog(text);
-  }
-
-  function appendLog(msg) {
-    const el = $('log');
-    const t = new Date().toISOString();
-    el.textContent += `[${t}] ${msg}\n`;
-    el.scrollTop = el.scrollHeight;
-  }
-
-  $('saveCfg').addEventListener('click', () => {
-    const base = $('baseUrl').value.trim();
-    localStorage.setItem(KEY, base);
-    updateVoiceUrl(base);
-    appendLog(`Saved BASE_URL = ${base}`);
-  });
-
-  $('pingHealth').addEventListener('click', async () => {
-    const base = $('baseUrl').value.trim();
-    if (!base) return alert('Set Server Base URL first');
-    try {
-      const r = await fetch(base + '/', { method: 'GET' });
-      const txt = await r.text();
-      setHealth(r.ok, txt.trim());
-    } catch (e) {
-      setHealth(false, e.message);
-    }
-  });
-
-  $('connectGoogle').addEventListener('click', () => {
-    const base = $('baseUrl').value.trim();
-    if (!base) return alert('Set Server Base URL first');
-    // Open server's OAuth start; it will redirect to Google and then back to server
-    window.open(base + '/auth/google', '_blank');
-    appendLog('Opened Google OAuth flow in new tab.');
-  });
-
-  $('whoAmI').addEventListener('click', async () => {
-    const base = $('baseUrl').value.trim();
-    if (!base) return alert('Set Server Base URL first');
-    $('authOut').textContent = 'Loading /gcal/me ...';
-    try {
-      const r = await fetch(base + '/gcal/me');
-      const j = await r.json();
-      $('authOut').textContent = JSON.stringify(j, null, 2);
-      appendLog('/gcal/me fetched');
-    } catch (e) {
-      $('authOut').textContent = e.message;
-    }
-  });
-
-  $('listToday').addEventListener('click', () => listDay('today'));
-  $('listTomorrow').addEventListener('click', () => listDay('tomorrow'));
-
-  async function listDay(which) {
-    const base = $('baseUrl').value.trim();
-    if (!base) return alert('Set Server Base URL first');
-    $('authOut').textContent = `Loading ${which} ...`;
-    try {
-      // The server currently exposes /gcal/today only.
-      // For tomorrow, we call listEventsOn via a small helper endpoint you can add,
-      // but here we demo today only.
-      if (which === 'today') {
-        const r = await fetch(base + '/gcal/today');
-        const j = await r.json();
-        $('authOut').textContent = JSON.stringify(j, null, 2);
-      } else {
-        // Client-side calc for tomorrow and call a not-yet-existing endpoint example
-        const d = new Date(); d.setDate(d.getDate() + 1);
-        const iso = d.toISOString().slice(0,10);
-        $('authOut').textContent = `Your server needs an endpoint like /gcal/on?date=${iso}`;
-      }
-      appendLog(`Listed ${which}`);
-    } catch (e) {
-      $('authOut').textContent = e.message;
-    }
-  }
-
-  $('createEvent').addEventListener('click', async () => {
-    const base = $('baseUrl').value.trim();
-    if (!base) return alert('Set Server Base URL first');
-
-    const summary = $('qSummary').value.trim() || 'Untitled';
-    const startLocal = $('qStart').value; // yyyy-mm-ddTHH:MM (local)
-    const durMin = parseInt($('qDur').value || '30', 10);
-    const attendees = ($('qAtt').value || '')
-      .split(',').map(s => s.trim()).filter(Boolean).join(',');
-
-    if (!startLocal) return alert('Pick a start time');
-
-    // Convert local datetime-local -> ISO string with timezone offset
-    const startIso = localToIso(startLocal);
-    const endIso = new Date(new Date(startIso).getTime() + durMin * 60000).toISOString();
-
-    const url = new URL(base + '/gcal/create');
-    url.searchParams.set('summary', summary);
-    url.searchParams.set('start', startIso);
-    url.searchParams.set('end', endIso);
-    if (attendees) url.searchParams.set('attendees', attendees);
-
-    $('createOut').textContent = 'Creating…';
-    try {
-      const r = await fetch(url.toString());
-      const j = await r.json();
-      $('createOut').textContent = JSON.stringify(j, null, 2);
-      appendLog('Created event');
-    } catch (e) {
-      $('createOut').textContent = e.message;
-    }
-  });
-
-  function localToIso(localValue) {
-    // localValue like "2025-09-18T14:00"
-    const [d, t] = localValue.split('T');
-    const [Y, M, D] = d.split('-').map(Number);
-    const [h, m] = (t || '00:00').split(':').map(Number);
-    const dt = new Date(Y, (M-1), D, h, m, 0);
-    return new Date(dt.getTime() - dt.getTimezoneOffset() * 60000).toISOString();
-  }
-})();
-</script>
+  <script src="app.js"></script>
 </body>
 </html>
