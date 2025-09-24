@@ -60,6 +60,11 @@ const server = http.createServer(async (req, res) => {
       return res.end(twiml);
     }
 
+    if (path === "/config") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      return res.end(JSON.stringify({ baseUrl: BASE_URL }, null, 2));
+    }
+
     // === Google OAuth kick-off ===
     if (path === "/auth/google") {
       const url = getAuthUrl();
