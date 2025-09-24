@@ -46,18 +46,15 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Parse URL & query safely
+    // Parse URL & query safely (BASE_URL already defined)
     const fullUrl = new URL(req.url, BASE_URL);
     const path = fullUrl.pathname;
 
     // === Twilio voice ===
     if (path === "/voice") {
-      // Use Twilio to say the greeting EXACTLY, then start the media stream
+      // Revert to AI greeting; Twilio only streams audio to us
       const twiml = `
         <Response>
-          <Say>
-            hello thank you for calling Furry Land Mobile Grooming, How can i help you today?
-          </Say>
           <Connect>
             <Stream url="${BASE_URL.replace(/^https?/, "wss")}/media" track="inbound_track"/>
           </Connect>
@@ -285,7 +282,7 @@ wss.on("connection", (twilioWS) => {
         Authorization: `Bearer ${OPENAI_API_KEY}`,
         "OpenAI-Beta": "realtime=v1",
         "x-openai-audio-output-format": "g711_ulaw",
-        "x-openai-audio-input-format":  "g711_ulaw;rate=8000",
+        "x-openai-audio-input-format":  "g711_ulaw;rate=8000", // 👈 REQUIRED
       },
     }
   );
@@ -295,7 +292,11 @@ wss.on("connection", (twilioWS) => {
     if (!twilioReady || !streamSid) return;
     if (msgObj?.event === "media" && !msgObj.streamSid) msgObj.streamSid = streamSid;
     if (twilioWS.readyState === WebSocket.OPEN) {
-      try { twilioWS.send(JSON.stringify(msgObj)); } catch (err) { console.error("[Twilio send error]", err); }
+      try {
+        twilioWS.send(JSON.stringify(msgObj));
+      } catch (err) {
+        console.error("[Twilio send error]", err);
+      }
     }
   };
 
@@ -303,7 +304,11 @@ wss.on("connection", (twilioWS) => {
   const safeSendOpenAI = (obj) => {
     const data = typeof obj === "string" ? obj : JSON.stringify(obj);
     if (openaiWS.readyState === WebSocket.OPEN) {
-      try { openaiWS.send(data); } catch (e) { console.error("[OpenAI send error]", e); }
+      try {
+        openaiWS.send(data);
+      } catch (e) {
+        console.error("[OpenAI send error]", e);
+      }
     } else {
       openaiOutbox.push(data);
     }
@@ -311,7 +316,7 @@ wss.on("connection", (twilioWS) => {
 
   // ---- Turn & VAD state machine ----
   let isAssistantSpeaking = false;
-  let awaitingResponse = false;
+  let awaitingResponse = false; // a response.create is in flight (e.g., greeting)
   let userSpeechActive = false;
   let userSpeechMs = 0;
   let silenceMs = 0;
@@ -322,12 +327,12 @@ wss.on("connection", (twilioWS) => {
   let capturedFrames = [];
   let sumLevel = 0;
   let levelCount = 0;
-  let greetingInFlight = false; // kept for compatibility (not used now)
 
   // Track assistant's text to guard against double-questions
   let assistantUtterance = "";
 
   // NEW: post-greeting & first turn tracking
+  let greetingInFlight = false;
   let postGreetingUntilTs = 0;
   let firstTurn = true;
 
@@ -423,10 +428,9 @@ wss.on("connection", (twilioWS) => {
   }
 
   function appendUserAudio(b64) {
-    // Ignore any frames during the short post-greeting cooldown
-    if (Date.now() < postGreetingUntilTs) return;
-
+    // Ignore any frames during the short post-greeting cooldown or while greeting is playing
     if (greetingInFlight) return;
+    if (Date.now() < postGreetingUntilTs) return;
 
     const level = rmsOfMuLawBase64(b64);
 
@@ -501,6 +505,7 @@ wss.on("connection", (twilioWS) => {
         response: {
           modalities: ["audio", "text"],
           conversation: "auto",
+          // Strong single-question directive every turn (+ no fillers)
           instructions:
             "Stay warm, slightly upbeat, and brief. Ask for **exactly ONE field** now in order: name → service → phone → date & time. " +
             "Do **not** combine fields. The only allowed 'and' is **'date and time'** once in a single question. " +
@@ -513,6 +518,7 @@ wss.on("connection", (twilioWS) => {
         },
       });
 
+      // After first bot reply, relax to normal thresholds
       firstTurn = false;
 
       resetUserCapture();
@@ -522,11 +528,7 @@ wss.on("connection", (twilioWS) => {
   async function handleListAppointments(args) {
     const { day, date_iso } = args || {};
     let target = date_iso ? new Date(date_iso) : new Date();
-  
-    if (!date_iso && day === "tomorrow") {
-      target.setDate(target.getDate() + 1);
-    }
-  
+    if (!date_iso && day === "tomorrow") target.setDate(target.getDate() + 1);
     try {
       const items = await listEventsOn(target.toISOString());
       return {
@@ -567,9 +569,7 @@ wss.on("connection", (twilioWS) => {
     }
 
     const start = new Date(start_iso);
-    if (isNaN(start.getTime())) {
-      return { ok: false, error: "Invalid start time." };
-    }
+    if (isNaN(start.getTime())) return { ok: false, error: "Invalid start time." };
     const end = new Date(start.getTime() + duration_min * 60 * 1000);
 
     const summary = `${service} — ${customer_name}`;
@@ -602,6 +602,7 @@ wss.on("connection", (twilioWS) => {
   // ---------- OpenAI socket ----------
   openaiWS.on("open", () => {
     console.log("[OpenAI] WS open");
+    // Configure to be reactive; our VAD drives turns.
     safeSendOpenAI({
       type: "session.update",
       session: {
@@ -650,6 +651,7 @@ wss.on("connection", (twilioWS) => {
       },
     });
 
+    // ✅ Flush queued items
     while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
   });
 
@@ -663,7 +665,12 @@ wss.on("connection", (twilioWS) => {
     function getEntryByAnyId({ call_id, item_id, id }) { const ids=[call_id,item_id,id].filter(Boolean); for (const k of ids){ if (openaiWS._toolCalls[k]) return {key:k,entry:openaiWS._toolCalls[k]}; const a=openaiWS._toolIdAlias[k]; if (a && openaiWS._toolCalls[a]) return {key:a,entry:openaiWS._toolCalls[a]}; } return null; }
     function ensureEntry(key, name) { if (!key) return null; openaiWS._toolCalls[key] = openaiWS._toolCalls[key] || { name, argsText: "" }; if (name && !openaiWS._toolCalls[key].name) openaiWS._toolCalls[key].name = name; return openaiWS._toolCalls[key]; }
 
-    const NOISY_TYPES = new Set(["response.audio_transcript.delta","response.output_audio.delta","response.audio.delta"]);
+    const NOISY_TYPES = new Set([
+      "response.audio_transcript.delta",
+      "response.output_text.delta",
+      "response.output_audio.delta",
+      "response.audio.delta"
+    ]);
     if (!NOISY_TYPES.has(msg.type)) console.log("[OpenAI EVENT]", msg.type);
 
     // ====== AUDIO STREAMING ======
@@ -680,9 +687,9 @@ wss.on("connection", (twilioWS) => {
       return;
     }
 
-    // Guard: detect and cancel double-questions in real time
-    if (msg.type === "response.audio_transcript.delta") {
-      const piece = msg.delta || "";
+    // ====== DOUBLE-QUESTION GUARDS on transcript OR text ======
+    if (msg.type === "response.audio_transcript.delta" || msg.type === "response.output_text.delta") {
+      const piece = msg.delta || msg.text || msg.output_text || "";
       if (piece) {
         assistantUtterance += piece;
         const res = isDisallowedDoubleQuestion(assistantUtterance);
@@ -699,10 +706,13 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
       assistantUtterance = "";
+
+      // If this was the greeting, start a short cooldown so we WAIT for caller speech
       if (greetingInFlight) {
         greetingInFlight = false;
-        // (No AI greeting now)
+        postGreetingUntilTs = Date.now() + POST_GREETING_COOLDOWN_MS;
       }
+
       if (!userSpeechActive) {
         safeSendOpenAI({ type: "input_audio_buffer.clear" });
       }
@@ -842,10 +852,29 @@ wss.on("connection", (twilioWS) => {
 
       resetUserCapture();
 
-      // Because Twilio already played the greeting before connecting the stream,
-      // just set the short cooldown so we don't react to line noise immediately.
-      postGreetingUntilTs = Date.now() + POST_GREETING_COOLDOWN_MS;
+      // AI does the greeting, exactly once
+      greetingInFlight = true;
+      openaiWS.readyState === WebSocket.OPEN
+        ? safeSendOpenAI({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              conversation: "auto",
+              instructions:
+                "Say exactly: 'hello thank you for calling Furry Land Mobile Grooming, How can i help you today?'"
+            },
+          })
+        : openaiOutbox.push(JSON.stringify({
+            type: "response.create",
+            response: {
+              modalities: ["audio", "text"],
+              conversation: "auto",
+              instructions:
+                "Say exactly: 'hello thank you for calling Furry Land Mobile Grooming, How can i help you today?'"
+            },
+          }));
 
+      awaitingResponse = true; // block any concurrent response.create while greeting plays
       return;
     }
 
