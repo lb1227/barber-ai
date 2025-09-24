@@ -23,7 +23,7 @@
   }
   header{
     padding:18px 20px;border-bottom:1px solid #1d2030;background:var(--panel);
-    display:flex;gap:14px;align-items:center;flex-wrap:wrap;position:top:0;z-index:3;
+    display:flex;gap:14px;align-items:center;flex-wrap:wrap;
   }
   header h1{font-size:16px;margin:0 10px 0 0;letter-spacing:.2px;opacity:.95}
   .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
@@ -48,8 +48,11 @@
   }
   button.secondary{background:#28304a;color:#d6dcf0}
   button.danger{background:var(--danger)}
-  main{display:grid;grid-template-columns:1.55fr .95fr;gap:18px;padding:18px;max-width:1280px;margin:0 auto}
-  @media (max-width:1000px){main{grid-template-columns:1fr;}}
+  main{
+    padding:18px;
+    max-width:1280px;
+    margin:0 auto;
+  }
   .card{
     background:var(--panel);border:1px solid #23273a;border-radius:14px;overflow:hidden;
   }
@@ -210,6 +213,87 @@
 .view[data-view="receptionist"] .ctrl select {
   width: 100%;
 }
+
+  .receptionist-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px 24px;
+  padding: 24px;
+}
+
+.receptionist-grid .ctrl {
+  background: var(--chip);
+  border-radius: 10px;
+  border: 1px solid #262b3e;
+  padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.receptionist-grid input,
+.receptionist-grid select {
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid #2c3147;
+  background: #111420;
+  color: var(--text);
+}
+
+.receptionist-grid-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+  .receptionist-card {
+  max-width: 900px;
+  margin: 40px auto;
+  border-radius: 16px;
+  box-shadow: 0 2px 10px rgba(0,0,0,.3);
+}
+
+.receptionist-form {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+  padding: 28px;
+}
+
+.receptionist-form .ctrl {
+  background: var(--chip);
+  border: 1px solid #262b3e;
+  border-radius: 10px;
+  padding: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.receptionist-form input,
+.receptionist-form select {
+  padding: 10px 12px;
+  border-radius: 6px;
+  border: 1px solid #2c3147;
+  background: #111420;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.receptionist-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  margin-top: 10px;
+}
+
+@media (max-width: 700px) {
+  .receptionist-form {
+    grid-template-columns: 1fr;
+  }
+}
   
 @media (max-width: 960px){
   .app{ grid-template-columns: 1fr; }
@@ -314,9 +398,9 @@
  </section>
 
   <section class="view" data-view="receptionist" hidden>
-  <section class="card">
+  <section class="card receptionist-card">
     <header><h2>Edit Receptionist</h2></header>
-    <div style="padding:20px; display:grid; gap:20px; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); align-items:start;">
+    <div class="receptionist-form">
       <!-- Identity -->
       <div class="ctrl" style="min-width:unset;">
         <label>Receptionist Name</label>
@@ -331,23 +415,23 @@
       </div>
 
       <!-- Business info -->
-      <div class="row" style="gap:12px; flex-wrap:wrap;">
-        <div class="ctrl" style="min-width:220px">
-          <label>Timezone</label>
-          <select id="rcpTZ">
-            <option value="America/New_York">America/New_York (ET)</option>
-            <option value="America/Chicago">America/Chicago (CT)</option>
-            <option value="America/Denver">America/Denver (MT)</option>
-            <option value="America/Los_Angeles">America/Los_Angeles (PT)</option>
-          </select>
-        </div>
-        <div class="ctrl" style="min-width:260px">
-          <label>Business Phone (for confirmations)</label>
-          <input id="rcpPhone" type="tel" placeholder="+1 555-123-4567"/>
-        </div>
+      <div class="ctrl">
+        <label>Timezone</label>
+        <select id="rcpTZ">
+          <option value="America/New_York">America/New_York (ET)</option>
+          <option value="America/Chicago">America/Chicago (CT)</option>
+          <option value="America/Denver">America/Denver (MT)</option>
+          <option value="America/Los_Angeles">America/Los_Angeles (PT)</option>
+        </select>
+      </div>
+      
+      <div class="ctrl">
+        <label>Business Phone (for confirmations)</label>
+        <input id="rcpPhone" type="tel" placeholder="+1 555-123-4567"/>
       </div>
 
-      <div style="display:flex; justify-content:flex-end; gap:8px; grid-column:1/-1;">
+
+      <div class="receptionist-actions">
         <button id="rcpSave">Save</button>
         <button class="secondary" id="rcpReset">Reset</button>
       </div>
