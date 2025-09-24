@@ -1,0 +1,43 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Barber AI — Admin</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header><h1>Barber AI Admin</h1></header>
+
+  <section class="card">
+    <h2>Google Calendar</h2>
+    <button id="btnConnect">Connect Google</button>
+    <button id="btnMe">Who am I?</button>
+    <button id="btnToday">Today’s Events</button>
+    <div id="me"></div>
+    <pre id="events"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Check a Day</h2>
+    <input id="date" type="date"/>
+    <button id="btnCheckDate">Check</button>
+    <pre id="dayEvents"></pre>
+  </section>
+
+  <section class="card">
+    <h2>Quick Book</h2>
+    <form id="bookForm">
+      <input name="customer_name" placeholder="Name" required />
+      <input name="phone" placeholder="Phone" />
+      <input name="service" placeholder="Service" required />
+      <input name="start_iso" placeholder="Start (YYYY-MM-DDTHH:mm-04:00)" required />
+      <input name="duration_min" type="number" value="30" min="5" />
+      <button type="submit">Book</button>
+    </form>
+    <pre id="bookResult"></pre>
+  </section>
+
+  <script src="app.js"></script>
+</body>
+</html>
