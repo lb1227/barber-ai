@@ -1,117 +1,509 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Barber AI Control Panel</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      background: #f7f7f7;
-      margin: 0;
-      padding: 0;
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      min-height: 100vh;
-    }
-    header {
-      background: #222;
-      color: white;
-      width: 100%;
-      text-align: center;
-      padding: 1rem;
-      font-size: 1.5rem;
-    }
-    main {
-      max-width: 600px;
-      width: 100%;
-      background: white;
-      box-shadow: 0 2px 6px rgba(0,0,0,0.1);
-      border-radius: 8px;
-      padding: 1rem 1.5rem;
-      margin-top: 2rem;
-    }
-    label {
-      display: block;
-      margin-top: 1rem;
-      font-weight: bold;
-    }
-    input, select, button {
-      width: 100%;
-      margin-top: 0.25rem;
-      padding: 0.5rem;
-      border-radius: 4px;
-      border: 1px solid #ccc;
-      font-size: 1rem;
-    }
-    button {
-      background: #0078d7;
-      color: white;
-      font-weight: bold;
-      margin-top: 1rem;
-      cursor: pointer;
-      border: none;
-    }
-    button:hover {
-      background: #005fa3;
-    }
-    #output {
-      margin-top: 1rem;
-      padding: 0.75rem;
-      background: #f1f1f1;
-      border-radius: 4px;
-      font-family: monospace;
-      white-space: pre-wrap;
-    }
-  </style>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Barber AI – Availability & Blackouts</title>
+<style>
+  :root{
+    --bg:#0f1115;
+    --panel:#171a21;
+    --muted:#8a93a6;
+    --text:#e7ecf7;
+    --accent:#4f8cff;
+    --accent-2:#5dd29b;
+    --danger:#ff6b6b;
+    --grid:#232736;
+    --chip:#222637;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:var(--bg);color:var(--text);
+    font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Inter, Arial;
+  }
+  header{
+    padding:18px 20px;border-bottom:1px solid #1d2030;background:var(--panel);
+    display:flex;gap:14px;align-items:center;flex-wrap:wrap;position:sticky;top:0;z-index:3;
+  }
+  header h1{font-size:16px;margin:0 10px 0 0;letter-spacing:.2px;opacity:.95}
+  .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .ctrl{
+    display:flex;flex-direction:column;gap:6px;background:var(--chip);
+    padding:10px 12px;border-radius:10px;border:1px solid #262b3e;min-width:140px;
+  }
+  .ctrl label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px}
+  .ctrl input[type="time"], .ctrl select{
+    background:#111420;color:var(--text);border:1px solid #2c3147;border-radius:8px;
+    padding:7px 8px;outline:none;
+  }
+  button{
+    background:var(--accent);color:white;border:none;border-radius:10px;
+    padding:10px 14px;font-weight:600;cursor:pointer;
+  }
+  button.secondary{background:#28304a;color:#d6dcf0}
+  button.danger{background:var(--danger)}
+  main{display:grid;grid-template-columns:1.55fr .95fr;gap:18px;padding:18px;max-width:1280px;margin:0 auto}
+  @media (max-width:1000px){main{grid-template-columns:1fr;}}
+  .card{
+    background:var(--panel);border:1px solid #23273a;border-radius:14px;overflow:hidden;
+  }
+  .card header{
+    display:flex;justify-content:space-between;align-items:center;background:#131722;border-bottom:1px solid #21263a;
+    padding:12px 14px;position:unset;
+  }
+  .card header h2{margin:0;font-size:14px;letter-spacing:.2px}
+  .hint{color:var(--muted);font-size:12px}
+  /* WEEK GRID */
+  .week-wrap{overflow:auto}
+  .week{
+    display:grid;grid-template-columns:70px repeat(7,1fr);min-width:880px;
+  }
+  .day-head,.time-cell{
+    background:#131722;border-bottom:1px solid #1f2436;position:sticky;top:0;z-index:2;
+  }
+  .day-head{padding:8px 10px;text-align:center;border-left:1px solid #1f2436}
+  .day-head .dow{font-size:12px;color:var(--muted)}
+  .day-head .date{font-weight:700}
+  .time-col{background:#111420;border-right:1px solid #1f2436}
+  .time-label{
+    height:40px;display:flex;align-items:flex-start;justify-content:flex-end;padding:2px 8px;color:var(--muted);
+    border-bottom:1px dashed #1e2435;font-size:12px
+  }
+  .slots{
+    display:grid;border-right:1px solid #1f2436;grid-auto-rows:20px;background:#0f1220;
+  }
+  .slot{
+    border-bottom:1px solid var(--grid);cursor:pointer;position:relative;
+  }
+  .slot:hover{background:#151a2a}
+  .slot.active{background:linear-gradient(180deg,#213259,#1e2b49);border-color:#364874;box-shadow:inset 0 0 0 1px #3c5aa9}
+  .slot.blocked{background:#1a171a;color:#d9a2a2;cursor:not-allowed;opacity:.55}
+  .tag{
+    position:absolute;right:6px;top:2px;font-size:10px;color:#cfe3ff;opacity:.8
+  }
+  /* MONTH CAL */
+  .month-controls{
+    display:flex;gap:8px;align-items:center
+  }
+  .month-grid{
+    display:grid;grid-template-columns:repeat(7,1fr);border-top:1px solid #22263b;border-left:1px solid #22263b
+  }
+  .cell{
+    min-height:78px;border-right:1px solid #22263b;border-bottom:1px solid #22263b;padding:8px;position:relative;
+    background:#0f1220;cursor:pointer;
+  }
+  .cell .d{position:absolute;top:6px;right:8px;color:var(--muted);font-size:12px}
+  .cell.dim{opacity:.5}
+  .cell.blockout{background:#2a171a;outline:2px solid #4a1c22}
+  .legend{display:flex;gap:10px;font-size:12px;color:var(--muted)}
+  .legend .chip{display:inline-flex;align-items:center;gap:6px}
+  .legend .dot{width:14px;height:14px;border-radius:4px;display:inline-block;background:#213259;border:1px solid #3c5aa9}
+  .legend .dot.block{background:#4a1c22;border-color:#7e303a}
+  footer{
+    max-width:1280px;margin:12px auto 28px;padding:0 18px;color:var(--muted);display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap
+  }
+  .inline-actions{display:flex;gap:8px;flex-wrap:wrap}
+  textarea#import{
+    width:100%;min-height:120px;background:#0e1220;border:1px solid #243054;color:#e6edff;border-radius:10px;padding:10px
+  }
+</style>
 </head>
 <body>
-  <header>Barber AI Control Panel</header>
-  <main>
-    <label for="customer">Customer Name</label>
-    <input type="text" id="customer" placeholder="Enter name" />
 
-    <label for="service">Service</label>
-    <select id="service">
-      <option value="">Select a service</option>
-      <option value="Haircut">Haircut</option>
-      <option value="Wash & Dye">Wash & Dye</option>
-      <option value="Shave">Shave</option>
-    </select>
+<header>
+  <h1>Barber AI – Scheduling Controls</h1>
+  <div class="row">
+    <div class="ctrl">
+      <label>Slot length</label>
+      <select id="slotLen">
+        <option value="15">15 min</option>
+        <option value="20">20 min</option>
+        <option value="30" selected>30 min</option>
+        <option value="60">60 min</option>
+      </select>
+    </div>
+    <div class="ctrl">
+      <label>Business hours</label>
+      <div class="row" style="gap:6px">
+        <input id="startHour" type="time" value="09:00">
+        <input id="endHour" type="time" value="18:00">
+      </div>
+    </div>
+    <div class="row">
+      <button class="secondary" id="prevWeekBtn">◀ Prev Week</button>
+      <button class="secondary" id="nextWeekBtn">Next Week ▶</button>
+      <button id="resetWeekBtn">Clear Week</button>
+    </div>
+    <div class="row">
+      <button class="secondary" id="exportBtn" title="Copy JSON">Export</button>
+      <button class="secondary" id="showImport">Import</button>
+    </div>
+  </div>
+</header>
 
-    <label for="time">Start Time</label>
-    <input type="datetime-local" id="time" />
+<main>
+  <!-- WEEK SCHEDULER -->
+  <section class="card">
+    <header>
+      <h2>Weekly Availability</h2>
+      <div class="legend">
+        <span class="chip"><span class="dot"></span> Available slot</span>
+        <span class="chip"><span class="dot block"></span> Blackout day</span>
+      </div>
+    </header>
+    <div class="week-wrap">
+      <div id="week" class="week"></div>
+    </div>
+    <div style="padding:10px 14px;border-top:1px solid #21263a" class="hint">
+      Tip: Click or click-drag to toggle availability. Blackout days (from the month view) are disabled here.
+    </div>
+  </section>
 
-    <label for="duration">Duration (minutes)</label>
-    <input type="number" id="duration" value="30" />
+  <!-- MONTH BLACKOUTS -->
+  <section class="card">
+    <header>
+      <h2>Blackout Days</h2>
+      <div class="month-controls">
+        <button class="secondary" id="prevMon">◀</button>
+        <div id="monTitle" class="hint">Month YYYY</div>
+        <button class="secondary" id="nextMon">▶</button>
+        <button class="danger" id="clearBlackouts">Clear All</button>
+      </div>
+    </header>
+    <div style="padding:8px 12px;color:var(--muted)">Click any day to toggle a full-day blackout (no bookings).</div>
+    <div id="month" class="month-grid"></div>
+  </section>
+</main>
 
-    <button onclick="bookAppointment()">Book Appointment</button>
+<footer>
+  <div>
+    <div class="hint">Data auto-saves in your browser. Use Export/Import to move it to another device or send to your backend.</div>
+  </div>
+  <div class="inline-actions">
+    <button id="todayBtn" class="secondary">Jump to Today</button>
+  </div>
+</footer>
 
-    <button onclick="listTomorrow()">List Tomorrow's Appointments</button>
+<section style="max-width:1280px;margin:0 auto;padding:0 18px 28px;display:none" id="importBox">
+  <h3>Import JSON</h3>
+  <textarea id="import"></textarea>
+  <div class="inline-actions" style="margin-top:8px">
+    <button id="doImport">Import</button>
+    <button class="secondary" id="cancelImport">Cancel</button>
+  </div>
+</section>
 
-    <div id="output">Output will show here...</div>
-  </main>
+<script>
+/* ---------- Utilities ---------- */
+const fmtDate = (d)=> new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10);
+const pad = n => String(n).padStart(2,'0');
+function minutesBetween(a,b){ return Math.max(0, Math.round((b-a)/60000)); }
+function addMinutes(date, m){ return new Date(date.getTime()+m*60000); }
+function weekStart(d){
+  const x=new Date(d); const day=(x.getDay()+6)%7; // Mon=0
+  x.setHours(0,0,0,0); x.setDate(x.getDate()-day); return x;
+}
+function clone(d){ return new Date(d.getTime()); }
+function tzLocalISO(date){ // yyyy-mm-ddTHH:MM (local)
+  const z = new Date(date.getTime()-date.getTimezoneOffset()*60000);
+  return z.toISOString().slice(0,16);
+}
 
-  <script>
-    async function bookAppointment() {
-      const customer = document.getElementById('customer').value;
-      const service = document.getElementById('service').value;
-      const time = document.getElementById('time').value;
-      const duration = Number(document.getElementById('duration').value);
+/* ---------- State ---------- */
+const storeKey = "barber_gui_state_v1";
+let state = {
+  slotLen: 30,
+  start: "09:00",
+  end: "18:00",
+  // availability: { 'YYYY-MM-DD': { 'HH:MM': true, ... } }
+  availability: {},
+  // blackoutDays: Set<string>
+  blackoutDays: {},
+  // cursors
+  weekCursor: weekStart(new Date()),
+  monthCursor: new Date(new Date().getFullYear(), new Date().getMonth(), 1)
+};
+function save(){ localStorage.setItem(storeKey, JSON.stringify(state)); }
+function load(){
+  try{
+    const raw = localStorage.getItem(storeKey);
+    if(!raw) return;
+    const s = JSON.parse(raw);
+    // merge sensibly
+    state = {
+      ...state,
+      ...s,
+      weekCursor: s.weekCursor ? new Date(s.weekCursor) : state.weekCursor,
+      monthCursor: s.monthCursor ? new Date(s.monthCursor) : state.monthCursor
+    };
+  }catch{}
+}
+load();
 
-      const payload = { customer_name: customer, service, start_iso: time, duration_min: duration };
-      const res = await fetch('/book', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+/* ---------- DOM refs ---------- */
+const slotLenSel = document.getElementById('slotLen');
+const startHour = document.getElementById('startHour');
+const endHour = document.getElementById('endHour');
+const weekEl = document.getElementById('week');
+const prevWeekBtn = document.getElementById('prevWeekBtn');
+const nextWeekBtn = document.getElementById('nextWeekBtn');
+const resetWeekBtn = document.getElementById('resetWeekBtn');
+const todayBtn = document.getElementById('todayBtn');
 
-      const data = await res.json();
-      document.getElementById('output').textContent = JSON.stringify(data, null, 2);
+const monTitle = document.getElementById('monTitle');
+const monthEl = document.getElementById('month');
+const prevMon = document.getElementById('prevMon');
+const nextMon = document.getElementById('nextMon');
+const clearBlackouts = document.getElementById('clearBlackouts');
+
+const exportBtn = document.getElementById('exportBtn');
+const showImport = document.getElementById('showImport');
+const importBox = document.getElementById('importBox');
+const importTxt = document.getElementById('import');
+const doImport = document.getElementById('doImport');
+const cancelImport = document.getElementById('cancelImport');
+
+/* ---------- Init controls ---------- */
+slotLenSel.value = String(state.slotLen);
+startHour.value = state.start;
+endHour.value   = state.end;
+
+/* ---------- Week view rendering ---------- */
+function renderWeek(){
+  const slot = Number(state.slotLen);
+  const [sh, sm] = state.start.split(':').map(Number);
+  const [eh, em] = state.end.split(':').map(Number);
+
+  const startMins = sh*60 + sm;
+  const endMins   = eh*60 + em;
+  if (endMins <= startMins) return; // invalid config guard
+
+  const rows = Math.ceil((endMins-startMins)/slot);
+  const days = Array.from({length:7},(_,i)=> addMinutes(state.weekCursor, i*24*60));
+  weekEl.innerHTML = "";
+
+  // headers
+  const headRow = document.createElement('div'); headRow.className="day-head time-cell";
+  headRow.style.gridColumn = "1 / span 1";
+  const timeCol = document.createElement('div'); timeCol.className="time-col";
+  // time labels column
+  const timeLabels = document.createElement('div'); timeLabels.style.display="grid";
+  timeLabels.style.gridAutoRows = "20px";
+  for(let r=0;r<rows;r++){
+    const t = startMins + r*slot;
+    if (t % 60 === 0) {
+      const lab = document.createElement('div');
+      lab.className="time-label";
+      lab.textContent = `${pad(Math.floor(t/60))}:00`;
+      timeLabels.appendChild(lab);
+    } else {
+      const spacer = document.createElement('div');
+      spacer.style.height="20px";
+      spacer.style.borderBottom="1px dashed #1e2435";
+      timeLabels.appendChild(spacer);
     }
+  }
+  weekEl.appendChild(timeCol);
+  timeCol.appendChild(timeLabels);
 
-    async function listTomorrow() {
-      const res = await fetch('/list?day=tomorrow');
-      const data = await res.json();
-      document.getElementById('output').textContent = JSON.stringify(data, null, 2);
-    }
-  </script>
+  // day headers
+  const dowNames = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"];
+  days.forEach((d,idx)=>{
+    const h = document.createElement('div');
+    h.className = "day-head";
+    const dateStr = fmtDate(d);
+    const disp = d.toLocaleDateString(undefined,{month:'short', day:'numeric'});
+    h.innerHTML = `<div class="dow">${dowNames[idx]}</div><div class="date">${disp}</div>`;
+    h.style.gridColumn = String(idx+2);
+    weekEl.appendChild(h);
+  });
+
+  // slots
+  let isDragging = false;
+  let dragMode = null; // true => activating, false => deactivating
+
+  const onDown = (e, dateStr, timeStr, cell) => {
+    if (state.blackoutDays[dateStr]) return;
+    isDragging = true;
+    const cur = !!(state.availability?.[dateStr]?.[timeStr]);
+    dragMode = !cur; // toggle intent
+    toggleSlot(dateStr, timeStr, dragMode);
+    cell.classList.toggle('active', dragMode);
+  };
+  const onOver = (e, dateStr, timeStr, cell) => {
+    if (!isDragging) return;
+    if (state.blackoutDays[dateStr]) return;
+    toggleSlot(dateStr, timeStr, dragMode);
+    cell.classList.toggle('active', dragMode);
+  };
+  const onUp = ()=>{ isDragging=false; dragMode=null; save(); };
+
+  document.addEventListener('mouseup', onUp, { once:false });
+
+  // build grid
+  for(let r=0;r<rows;r++){
+    const mins = startMins + r*slot;
+    // time column cell spacing already built
+    days.forEach((d)=>{
+      const dateStr = fmtDate(d);
+      const hours = Math.floor(mins/60), minutes = mins%60;
+      const timeStr = `${pad(hours)}:${pad(minutes)}`;
+      const col = document.createElement('div'); col.className="slots";
+      col.style.gridColumn = "span 1";
+      const cell = document.createElement('div');
+      cell.className = "slot";
+      if (state.blackoutDays[dateStr]) cell.classList.add('blocked');
+
+      // reflect state
+      if (state.availability?.[dateStr]?.[timeStr]) cell.classList.add('active');
+
+      // events
+      cell.addEventListener('mousedown', (e)=>onDown(e,dateStr,timeStr,cell));
+      cell.addEventListener('mouseenter', (e)=>onOver(e,dateStr,timeStr,cell));
+
+      // tiny label at :00 only
+      if (minutes===0){
+        const tag = document.createElement('div'); tag.className="tag";
+        tag.textContent = `${pad(hours)}:00`;
+        cell.appendChild(tag);
+      }
+
+      col.appendChild(cell);
+      weekEl.appendChild(col);
+    });
+  }
+}
+
+function toggleSlot(dateStr, timeStr, on){
+  state.availability[dateStr] = state.availability[dateStr] || {};
+  if (on) state.availability[dateStr][timeStr] = true;
+  else delete state.availability[dateStr][timeStr];
+  // cleanup
+  if (Object.keys(state.availability[dateStr]).length===0) delete state.availability[dateStr];
+}
+
+/* ---------- Month view rendering ---------- */
+function renderMonth(){
+  const cur = state.monthCursor;
+  const y = cur.getFullYear();
+  const m = cur.getMonth();
+  const first = new Date(y,m,1);
+  const last  = new Date(y,m+1,0);
+  monTitle.textContent = first.toLocaleString(undefined,{month:'long', year:'numeric'});
+
+  // start on Monday
+  const startOffset = ( (first.getDay()+6)%7 );
+  const startCellDate = new Date(y,m,1 - startOffset);
+  const totalCells = 42; // 6 weeks grid
+
+  monthEl.innerHTML = "";
+  for(let i=0;i<totalCells;i++){
+    const d = new Date(startCellDate); d.setDate(d.getDate()+i);
+    const inMonth = d.getMonth()===m;
+    const key = fmtDate(d);
+    const cell = document.createElement('div');
+    cell.className = "cell";
+    if (!inMonth) cell.classList.add('dim');
+    if (state.blackoutDays[key]) cell.classList.add('blockout');
+
+    cell.innerHTML = `<div class="d">${d.getDate()}</div>`;
+    cell.addEventListener('click', ()=>{
+      // toggle blackout
+      if (state.blackoutDays[key]) {
+        delete state.blackoutDays[key];
+      } else {
+        state.blackoutDays[key] = true;
+        // wipe any availability on that day
+        delete state.availability[key];
+      }
+      save();
+      renderMonth();
+      renderWeek();
+    });
+
+    monthEl.appendChild(cell);
+  }
+}
+
+/* ---------- Wire controls ---------- */
+slotLenSel.addEventListener('change', e=>{
+  state.slotLen = Number(e.target.value); save(); renderWeek();
+});
+[startHour, endHour].forEach(inp=>{
+  inp.addEventListener('change', ()=>{
+    state.start = startHour.value;
+    state.end   = endHour.value;
+    save(); renderWeek();
+  });
+});
+
+prevWeekBtn.addEventListener('click', ()=>{
+  state.weekCursor = addMinutes(state.weekCursor, -7*24*60); save(); renderWeek();
+});
+nextWeekBtn.addEventListener('click', ()=>{
+  state.weekCursor = addMinutes(state.weekCursor, 7*24*60); save(); renderWeek();
+});
+todayBtn.addEventListener('click', ()=>{
+  state.weekCursor = weekStart(new Date()); state.monthCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  save(); renderWeek(); renderMonth();
+});
+resetWeekBtn.addEventListener('click', ()=>{
+  const days = Array.from({length:7},(_,i)=> fmtDate(addMinutes(state.weekCursor, i*24*60)));
+  days.forEach(d=> delete state.availability[d]);
+  save(); renderWeek();
+});
+
+prevMon.addEventListener('click', ()=>{ state.monthCursor = new Date(state.monthCursor.getFullYear(), state.monthCursor.getMonth()-1, 1); save(); renderMonth(); });
+nextMon.addEventListener('click', ()=>{ state.monthCursor = new Date(state.monthCursor.getFullYear(), state.monthCursor.getMonth()+1, 1); save(); renderMonth(); });
+clearBlackouts.addEventListener('click', ()=>{
+  state.blackoutDays = {};
+  save(); renderMonth(); renderWeek();
+});
+
+/* ---------- Export / Import ---------- */
+exportBtn.addEventListener('click', ()=>{
+  const payload = {
+    slotLen: state.slotLen,
+    start: state.start,
+    end: state.end,
+    availability: state.availability,
+    blackoutDays: state.blackoutDays
+  };
+  const text = JSON.stringify(payload, null, 2);
+  navigator.clipboard.writeText(text).catch(()=>{});
+  exportBtn.textContent = "Copied!";
+  setTimeout(()=> exportBtn.textContent = "Export", 900);
+});
+showImport.addEventListener('click', ()=>{ importBox.style.display = 'block'; importTxt.value = ''; });
+cancelImport.addEventListener('click', ()=>{ importBox.style.display = 'none'; });
+doImport.addEventListener('click', ()=>{
+  try{
+    const obj = JSON.parse(importTxt.value);
+    state.slotLen = Number(obj.slotLen) || state.slotLen;
+    state.start   = obj.start || state.start;
+    state.end     = obj.end   || state.end;
+    state.availability = obj.availability || {};
+    state.blackoutDays = obj.blackoutDays || {};
+    save(); renderWeek(); renderMonth();
+    importBox.style.display = 'none';
+  }catch(e){
+    alert("Invalid JSON");
+  }
+});
+
+/* ---------- First paint ---------- */
+renderWeek();
+renderMonth();
+
+/* ---------- Public API (future backend hook) ----------
+window.getSchedulePayload = () => ({
+  slotLen: state.slotLen,
+  start: state.start,
+  end: state.end,
+  availability: state.availability,
+  blackoutDays: state.blackoutDays
+});
+------------------------------------------------------ */
+</script>
 </body>
 </html>
