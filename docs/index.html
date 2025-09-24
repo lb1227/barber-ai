@@ -31,7 +31,13 @@
     display:flex;flex-direction:column;gap:6px;background:var(--chip);
     padding:10px 12px;border-radius:10px;border:1px solid #262b3e;min-width:140px;
   }
-  .ctrl label{font-size:11px;color:var(--muted);text-transform:uppercase;letter-spacing:.6px}
+  .ctrl label{
+    font-size:13px;
+    font-weight:600;
+    color:var(--muted);
+    text-transform:uppercase;
+    letter-spacing:.8px;
+  }
   .ctrl input[type="time"], .ctrl select{
     background:#111420;color:var(--text);border:1px solid #2c3147;border-radius:8px;
     padding:7px 8px;outline:none;
@@ -199,6 +205,11 @@
   background:linear-gradient(to bottom, rgba(0,0,0,.35), rgba(0,0,0,0));
   pointer-events:none;
 }
+
+.view[data-view="receptionist"] .ctrl input,
+.view[data-view="receptionist"] .ctrl select {
+  width: 100%;
+}
   
 @media (max-width: 960px){
   .app{ grid-template-columns: 1fr; }
@@ -234,7 +245,7 @@
   <aside class="sidebar">
     <nav class="nav">
       <button class="nav-item active" data-view="scheduling">Scheduling</button>
-      <button class="nav-item" data-view="greeting">Greeting</button>
+      <button class="nav-item" data-view="receptionist">Edit Receptionist</button>
       <button class="nav-item" data-view="advanced">Advanced</button>
       <button class="nav-item" data-view="logs">Logs</button>
     </nav>
@@ -301,16 +312,46 @@
   </div>
     
  </section>
-  <section class="view" data-view="greeting" hidden>
+
+  <section class="view" data-view="receptionist" hidden>
   <section class="card">
-    <header><h2>Greeting</h2></header>
-    <div style="padding:14px">
-      <p class="hint">Customize what the bot says when it answers.</p>
-      <div style="display:flex; gap:10px; margin-top:8px;">
-        <input id="greetingInput2" type="text" style="flex:1"
-               placeholder="Hello, thank you for calling the barbershop! How can I help you today.">
-        <button id="saveGreeting2">Save</button>
+    <header><h2>Edit Receptionist</h2></header>
+    <div style="padding:20px; display:grid; gap:20px; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); align-items:start;">
+      <!-- Identity -->
+      <div class="ctrl" style="min-width:unset;">
+        <label>Receptionist Name</label>
+        <input id="rcpName" type="text" placeholder="Barber AI Receptionist"/>
       </div>
+
+      <!-- Greeting -->
+      <div class="ctrl" style="min-width:unset;">
+        <label>Greeting</label>
+        <input id="rcpGreeting" type="text"
+               placeholder="Hello, thank you for calling the barbershop! How can I help you today."/>
+      </div>
+
+      <!-- Business info -->
+      <div class="row" style="gap:12px; flex-wrap:wrap;">
+        <div class="ctrl" style="min-width:220px">
+          <label>Timezone</label>
+          <select id="rcpTZ">
+            <option value="America/New_York">America/New_York (ET)</option>
+            <option value="America/Chicago">America/Chicago (CT)</option>
+            <option value="America/Denver">America/Denver (MT)</option>
+            <option value="America/Los_Angeles">America/Los_Angeles (PT)</option>
+          </select>
+        </div>
+        <div class="ctrl" style="min-width:260px">
+          <label>Business Phone (for confirmations)</label>
+          <input id="rcpPhone" type="tel" placeholder="+1 555-123-4567"/>
+        </div>
+      </div>
+
+      <div style="display:flex; justify-content:flex-end; gap:8px; grid-column:1/-1;">
+        <button id="rcpSave">Save</button>
+        <button class="secondary" id="rcpReset">Reset</button>
+      </div>
+      <div class="hint">These settings save locally. Later we’ll POST them to your backend.</div>
     </div>
   </section>
 </section>
@@ -318,9 +359,41 @@
 <section class="view" data-view="advanced" hidden>
   <section class="card">
     <header><h2>Advanced Features</h2></header>
-    <div style="padding:14px">
-      <p class="hint">Add things like “Temporary disable”, “Time controls”, or “Extension digits”.</p>
+    <div style="padding:14px; display:grid; gap:12px;">
+
+      <!-- Voice / speaking -->
+      <div class="row" style="gap:12px; flex-wrap:wrap;">
+        <div class="ctrl" style="min-width:220px">
+          <label>Voice</label>
+          <select id="rcpVoice">
+            <option value="alloy">Alloy</option>
+            <option value="verse">Verse</option>
+            <option value="breeze">Breeze</option>
+          </select>
+        </div>
+        <div class="ctrl" style="min-width:220px">
+          <label>Speaking Rate</label>
+          <input id="rcpRate" type="number" step="0.1" min="0.5" max="2" placeholder="1.0"/>
+        </div>
+      </div>
+    
+      <!-- Call behavior -->
+      <div class="row" style="gap:12px; flex-wrap:wrap;">
+        <div class="ctrl" style="min-width:220px">
+          <label>Allow Barge-in</label>
+          <select id="rcpBarge">
+            <option value="true">Yes (recommended)</option>
+            <option value="false">No</option>
+          </select>
+        </div>
+        <div class="ctrl" style="min-width:220px">
+          <label>End-of-Utterance Silence (ms)</label>
+          <input id="rcpEOS" type="number" step="100" min="300" placeholder="1000"/>
+        </div>
+      </div>
+    
     </div>
+
   </section>
 </section>
 
@@ -373,7 +446,18 @@ let state = {
   weekCursor: weekStart(new Date()),
   monthCursor: new Date(new Date().getFullYear(), new Date().getMonth(), 1),
 
-  greeting: "Hello, thank you for calling the barbershop! How can I help you today."
+  greeting: "Hello, thank you for calling the barbershop! How can I help you today.",
+
+  receptionist: {
+    name: "Barber AI Receptionist",
+    greeting: "Hello, thank you for calling the barbershop! How can I help you today.",
+    voice: "alloy",
+    rate: 1.0,
+    bargeIn: true,
+    endSilenceMs: 1000,
+    timezone: "America/New_York",
+    phone: ""
+  }
 };
 function save(){ localStorage.setItem(storeKey, JSON.stringify(state)); }
 function load(){
@@ -387,7 +471,8 @@ function load(){
       ...s,
       weekCursor: s.weekCursor ? new Date(s.weekCursor) : state.weekCursor,
       monthCursor: s.monthCursor ? new Date(s.monthCursor) : state.monthCursor,
-      greeting: typeof s.greeting === "string" ? s.greeting : state.greeting
+      greeting: typeof s.greeting === "string" ? s.greeting : state.greeting,
+      receptionist: { ...state.receptionist, ...(s.receptionist || {}) }
     };
   }catch{}
 }
@@ -409,6 +494,18 @@ const prevMon = document.getElementById('prevMon');
 const nextMon = document.getElementById('nextMon');
 const clearBlackouts = document.getElementById('clearBlackouts');
 
+// Edit Receptionist refs
+const rcpName    = document.getElementById('rcpName');
+const rcpGreeting= document.getElementById('rcpGreeting');
+const rcpVoice   = document.getElementById('rcpVoice');
+const rcpRate    = document.getElementById('rcpRate');
+const rcpBarge   = document.getElementById('rcpBarge');
+const rcpEOS     = document.getElementById('rcpEOS');
+const rcpTZ      = document.getElementById('rcpTZ');
+const rcpPhone   = document.getElementById('rcpPhone');
+const rcpSave    = document.getElementById('rcpSave');
+const rcpReset   = document.getElementById('rcpReset');
+
 
   /* === Left-nav view router === */
 function showView(name){
@@ -418,7 +515,7 @@ function showView(name){
   document.querySelectorAll('.view').forEach(v=>{
     v.hidden = v.dataset.view !== name;
   });
-  // optional: location.hash = name;
+  if (name === 'receptionist') paintReceptionistForm();
 }
 document.querySelectorAll('.nav-item').forEach(b=>{
   b.addEventListener('click', ()=> showView(b.dataset.view));
@@ -449,6 +546,34 @@ function formatTime12h(hours, minutes = 0) {
   const s = start.toLocaleDateString(undefined, opts);
   const e = end.toLocaleDateString(undefined, opts);
   return `${s} – ${e}`;
+}
+ /* ---------- Receptionist hydrators and helpers ---------- */
+  function paintReceptionistForm(){
+  const r = state.receptionist;
+  if (!rcpName) return; // view not mounted yet
+  rcpName.value     = r.name ?? "";
+  rcpGreeting.value = r.greeting ?? "";
+  rcpVoice.value    = r.voice ?? "alloy";
+  rcpRate.value     = r.rate ?? 1.0;
+  rcpBarge.value    = String(r.bargeIn ?? true);
+  rcpEOS.value      = r.endSilenceMs ?? 1000;
+  rcpTZ.value       = r.timezone ?? "America/New_York";
+  rcpPhone.value    = r.phone ?? "";
+}
+
+function saveReceptionistFromForm(){
+  state.receptionist = {
+    ...state.receptionist,
+    name: rcpName.value.trim(),
+    greeting: rcpGreeting.value.trim(),
+    voice: rcpVoice.value,
+    rate: Number(rcpRate.value || 1.0),
+    bargeIn: rcpBarge.value === "true",
+    endSilenceMs: Number(rcpEOS.value || 1000),
+    timezone: rcpTZ.value,
+    phone: rcpPhone.value.trim()
+  };
+  save();
 }
 
 /* ---------- Week view rendering ---------- */
@@ -687,9 +812,13 @@ nextWeek.addEventListener('click', ()=>{
   save(); renderWeek();
 });
 clearWeek.addEventListener('click', ()=>{
-  const days = Array.from({length:7},(_,i)=> fmtDate(addMinutes(state.weekCursor, i*24*60)));
-  days.forEach(d=> delete state.availability[d]);
-  save(); renderWeek();
+  const weekStartDate = state.weekCursor;
+  for (let i = 0; i < 7; i++) {
+    const key = fmtDate(addMinutes(weekStartDate, i*24*60));
+    delete state.availability[key];
+  }
+  save();
+  renderWeek();
 });
 
 prevMon.addEventListener('click', ()=>{ state.monthCursor = new Date(state.monthCursor.getFullYear(), state.monthCursor.getMonth()-1, 1); save(); renderMonth(); });
@@ -699,10 +828,35 @@ clearBlackouts.addEventListener('click', ()=>{
   save(); renderMonth(); renderWeek();
 });
 
+  if (rcpSave) {
+  rcpSave.addEventListener('click', ()=>{
+    saveReceptionistFromForm();
+    rcpSave.textContent = "Saved!";
+    setTimeout(()=> rcpSave.textContent = "Save", 900);
+  });
+}
+if (rcpReset) {
+  rcpReset.addEventListener('click', ()=>{
+    state.receptionist = {
+      name: "Barber AI Receptionist",
+      greeting: "Hello, thank you for calling the barbershop! How can I help you today.",
+      voice: "alloy",
+      rate: 1.0,
+      bargeIn: true,
+      endSilenceMs: 1000,
+      timezone: "America/New_York",
+      phone: ""
+    };
+    save();
+    paintReceptionistForm();
+  });
+}
+
 
 /* ---------- First paint ---------- */
 renderWeek();
 renderMonth();
+paintReceptionistForm();
 
 /* ---------- Sanity checks (light tests in console) ---------- */
 (function runSanity(){
