@@ -46,13 +46,12 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Parse URL & query safely (BASE_URL already defined)
+    // Parse URL & query safely (BASE_URL already defined in your file)
     const fullUrl = new URL(req.url, BASE_URL);
     const path = fullUrl.pathname;
 
     // === Twilio voice ===
     if (path === "/voice") {
-      // Revert to AI greeting; Twilio only streams audio to us
       const twiml = `
         <Response>
           <Connect>
@@ -121,18 +120,18 @@ const server = http.createServer(async (req, res) => {
       console.log("[HTTP] /gcal/create",
         "summary=", summary, "start=", start, "end=", end, "attendees=", attendees.join(",")
       );
-      
+
       const event = await createEvent({ summary, start, end, attendees });
-      
+
       console.log("[HTTP] /gcal/create OK id=", event.id);
-      
+
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify(event, null, 2));
     }
 
     // === Default health check ===
     res.writeHead(200, { "Content-Type": "text/plain" });
-    res.end("Furry Land Realtime bridge is alive.\n");
+    res.end("Barber AI Realtime bridge is alive.\n");
   } catch (err) {
     console.error("[HTTP error]", err);
     res.writeHead(500, { "Content-Type": "text/plain" });
@@ -163,12 +162,13 @@ server.on("upgrade", (req, socket, head) => {
 
 // ---------- Helpers: μ-law decode + RMS ----------
 function muLawByteToPcm16(u) {
+  // μ-law decode (G.711) – returns int16
   u = ~u & 0xff;
   const sign = u & 0x80;
   let exponent = (u >> 4) & 0x07;
   let mantissa = u & 0x0f;
   let sample = ((mantissa << 4) + 0x08) << (exponent + 3);
-  sample -= 0x84;
+  sample -= 0x84; // bias
   return sign ? -sample : sample;
 }
 
@@ -178,6 +178,7 @@ function rmsOfMuLawBase64(b64) {
     const len = buf.length;
     if (!len) return 0;
     let sumSq = 0;
+    // Sample μ-law bytes sparsely if very large to save CPU
     const stride = len > 3200 ? Math.floor(len / 1600) : 1;
     let count = 0;
     for (let i = 0; i < len; i += stride) {
@@ -186,6 +187,7 @@ function rmsOfMuLawBase64(b64) {
       count++;
     }
     const meanSq = sumSq / Math.max(1, count);
+    // Normalize to ~0..1 from int16
     return Math.sqrt(meanSq) / 32768;
   } catch {
     return 0;
@@ -204,34 +206,10 @@ const VAD = {
 };
 const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
 
-// NEW: post-greeting and first-turn guards
-const POST_GREETING_COOLDOWN_MS = 700; // ignore audio right after greeting
-const MIN_AVG_RMS_FIRST = 0.040;       // stronger loudness required for 1st caller turn
-const MIN_SPEECH_MS_FIRST = 320;       // longer speech needed for 1st caller turn
-
-// === Business facts (mention only if asked) ===
-const BUSINESS_FACTS =
-[
-  "# Business Facts — mention only if caller asks",
-  "**Brand:** Furry Land Mobile Grooming — Tampa",
-  "**Mobile & cage-free:** We come to you in a grooming van; fear-free, spa-like experience; text/email alerts.",
-  "**Total Care Grooming package includes:** on-site assessment; heated hydrobath with specialty shampoo/conditioner; full body haircut or deshedding; nail clipping/file; paw pad shave; eye/ear cleaning; full body towel & blow out; blueberry facial.",
-  "**Starting prices (estimates; vary by breed/size/coat/temperament & add-ons):**",
-  "- Small dogs (0–25 lb) starting at $115; bath only starts at $100.",
-  "- Medium dogs (26–50 lb) starting at $135; bath only $125.",
-  "- Large dogs (51–80 lb) starting at $165; bath only $150.",
-  "- Extra large (81–110 lb) starting at $180; bath only $170.",
-  "- Giant (110+ lb) starting at $210; bath only $190.",
-  "- Cats starting at $150; bath only $135.",
-  "**Add-ons:** Fresh Breath Treatment $12; Nail Pawlish $10.",
-  "**Service area (Tampa & nearby):** includes cities like Apollo Beach, Brandon, Carrollwood, Citrus Park, Clearwater, Dunedin, Fish Hawk, Keystone, and more.",
-  "**Policy note:** listed rates are estimates and can increase based on size/breed/coat condition/temperament and added services."
-].join("\n");
-
 // === Identity, task & single-question rules ===
 const INSTRUCTIONS =
   [
-    "You are a **Mobile Pet Grooming Assistant** for Furry Land Tampa.",
+    "You are a **Mobile Pet Grooming Assistant** for a small business.",
     "Your primary tasks: **book, reschedule, and cancel appointments**, and **answer basic questions** about services, pricing ranges, service areas, hours, and simple policies.",
     "Scope guard: **only** discuss topics related to mobile pet grooming. If asked something unrelated, politely steer back to grooming and booking.",
     "",
@@ -241,12 +219,10 @@ const INSTRUCTIONS =
     "- Formality: **casual but slightly professional** (it’s a business).",
     "- Emotion: **appropriately expressive** and empathetic within normal workplace standards.",
     "- Pacing: **slightly brisk**. Keep replies short (≈8–14 words) and avoid long monologues.",
-    "- Avoid filler transitions like “great”, “awesome”, “perfect”, “okay/ok”, “alright”, or “so”. Start the question directly.",
     "",
     "# Single-question policy (STRICT)",
     "- **Ask for exactly one field per turn**. Never combine fields in one question.",
-    "- The **only allowed pair** is **date & time**, asked as a single clean question.",
-    "- **Do not use 'and'** in your question **unless** you ask exactly: 'date and time' once.",
+    "- The **only allowed pair** is **date & time** (asked as one question).",
     "- Collect in this order: **name → service → phone → date & time**.",
     "- After each answer, briefly acknowledge (e.g., 'Got it, thanks.') and move to the next field.",
     "",
@@ -258,10 +234,6 @@ const INSTRUCTIONS =
     "5) Offer up to two earliest viable availability options when asked.",
     "6) No live transfers. Finish bookings on the call.",
     "7) Use the tools (`list_appointments`, `book_appointment`) appropriately. Do not invent other tools.",
-    "",
-    BUSINESS_FACTS,
-    "",
-    "# Only mention Business Facts if the caller asks about them (e.g., price, what's included, service areas).",
   ].join("\n");
 
 // ---------- Main bridge ----------
@@ -327,14 +299,10 @@ wss.on("connection", (twilioWS) => {
   let capturedFrames = [];
   let sumLevel = 0;
   let levelCount = 0;
-
-  // Track assistant's text to guard against double-questions
-  let assistantUtterance = "";
-
-  // NEW: post-greeting & first turn tracking
   let greetingInFlight = false;
-  let postGreetingUntilTs = 0;
-  let firstTurn = true;
+
+  // NEW: track the assistant's current utterance text so we can guard double-questions
+  let assistantUtterance = "";
 
   function resetUserCapture() {
     userSpeechActive = false;
@@ -348,75 +316,27 @@ wss.on("connection", (twilioWS) => {
     levelCount = 0;
   }
 
-  // Detect disallowed double-questions (except clean "date and time")
+  // --- simple detector for disallowed combined fields in one question
   function isDisallowedDoubleQuestion(text) {
     const s = (text || "").toLowerCase();
-
-    const hits = (tokens) => tokens.reduce((n, t) => n + ((s.match(new RegExp(`\\b${t}\\b`, "g")) || []).length), 0);
-    const hasAny = (tokens) => hits(tokens) > 0;
-
-    const nameTokens    = ["name", "first name", "last name"];
-    const serviceTokens = ["service", "grooming", "groom"];
-    const phoneTokens   = ["phone", "phone number", "callback number", "contact number"];
-    const dateTokens    = ["date", "day", "today", "tomorrow", "monday","tuesday","wednesday","thursday","friday","saturday","sunday"];
-    const timeTokens    = ["time", "am", "pm", "morning", "afternoon", "evening", "o'clock"];
-
-    const cats = new Set();
-    if (hasAny(nameTokens))    cats.add("name");
-    if (hasAny(serviceTokens)) cats.add("service");
-    if (hasAny(phoneTokens))   cats.add("phone");
-    if (hasAny(dateTokens))    cats.add("date");
-    if (hasAny(timeTokens))    cats.add("time");
-
-    const andCount  = (s.match(/\band\b/g) || []).length;
-    const qCount    = (s.match(/\?/g) || []).length;
-    const timeCount = hits(timeTokens);
-    const dateCount = hits(dateTokens);
-
-    const isOnlyDateTime = (cats.size === 2 && cats.has("date") && cats.has("time"));
-
-    if (!isOnlyDateTime && cats.size >= 2) {
-      return { disallowed: true, prefer: cats.has("name") && cats.has("service") ? "name"
-                               : cats.has("phone") ? "phone"
-                               : "single" };
-    }
-    if (isOnlyDateTime) {
-      if (andCount > 1 || timeCount > 1 || dateCount > 1 || qCount > 1) {
-        return { disallowed: true, prefer: "date_time_simple" };
-      }
-    }
-
-    const twoClauseAsk =
-      /\bname\b.*\band\b.*\bservice\b/.test(s) ||
-      /\bservice\b.*\band\b.*\bname\b/.test(s) ||
-      /\bphone( number)?\b.*\band\b.*\b(date|day|time)\b/.test(s);
-
-    if (twoClauseAsk) {
-      return { disallowed: true, prefer: /name.*and.*service/.test(s) ? "name" : "phone" };
-    }
-
-    if (/\bdate\b.*\btime\b.*\band\b.*\btime\b/.test(s)) {
-      return { disallowed: true, prefer: "date_time_simple" };
-    }
-
-    return { disallowed: false };
+    const mentions = (k) => s.includes(k);
+    const nameAndService = mentions("name") && mentions("service");
+    const phoneAndWhen = (mentions("phone") || mentions("phone number")) &&
+                         (mentions("date") || mentions("day") || mentions("time"));
+    const dateAndTimeOnly = (mentions("date") || mentions("day")) && mentions("time"); // allowed
+    if (dateAndTimeOnly && !phoneAndWhen) return false; // allow date+time
+    return nameAndService || phoneAndWhen;
   }
 
   function reAskSingleField(field) {
+    // Cancel current speech and re-ask ONLY the single field
     if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
     awaitingResponse = true;
-
-    let instructions;
-    if (field === "name") {
-      instructions = "Ask only for the caller’s name. One short question. Don’t add anything else.";
-    } else if (field === "phone") {
-      instructions = "Ask only for the caller’s phone number. One short question. Don’t add anything else.";
-    } else if (field === "date_time_simple") {
-      instructions = "Ask exactly: 'What date and time work best for you?' One sentence only.";
-    } else {
-      instructions = "Ask only one question for the next missing field. Do not combine fields.";
-    }
-
+    const fieldPromptMap = {
+      name: "Ask only for the caller’s name. One short question. Don’t ask anything else.",
+      phone: "Ask only for the caller’s phone number. One short question. Don’t ask anything else.",
+    };
+    const instructions = fieldPromptMap[field] || "Ask only one question for the next missing field. Do not combine.";
     safeSendOpenAI({
       type: "response.create",
       response: {
@@ -428,9 +348,7 @@ wss.on("connection", (twilioWS) => {
   }
 
   function appendUserAudio(b64) {
-    // Ignore any frames during the short post-greeting cooldown or while greeting is playing
     if (greetingInFlight) return;
-    if (Date.now() < postGreetingUntilTs) return;
 
     const level = rmsOfMuLawBase64(b64);
 
@@ -474,9 +392,7 @@ wss.on("connection", (twilioWS) => {
     sumLevel += level;
     levelCount += 1;
 
-    const minSpeechMs = firstTurn ? MIN_SPEECH_MS_FIRST : VAD.MIN_SPEECH_MS;
-    const utteranceLongEnough = userSpeechMs >= minSpeechMs;
-
+    const utteranceLongEnough = userSpeechMs >= VAD.MIN_SPEECH_MS;
     const endedBySilence = silenceMs >= VAD.END_SILENCE_MS;
     const endedByTimeout = turnMs >= VAD.MAX_TURN_DURATION_MS;
 
@@ -487,12 +403,11 @@ wss.on("connection", (twilioWS) => {
       }
 
       const avgLevel = levelCount ? (sumLevel / levelCount) : 0;
-      const minAvg = firstTurn ? MIN_AVG_RMS_FIRST : MIN_AVG_RMS;
-      if (avgLevel < minAvg) {
+      if (avgLevel < MIN_AVG_RMS) {
         resetUserCapture();
         return;
       }
-      
+
       for (const f of capturedFrames) {
         safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
       }
@@ -505,22 +420,17 @@ wss.on("connection", (twilioWS) => {
         response: {
           modalities: ["audio", "text"],
           conversation: "auto",
-          // Strong single-question directive every turn (+ no fillers)
+          // Strong single-question directive every turn
           instructions:
-            "Stay warm, slightly upbeat, and brief. Ask for **exactly ONE field** now in order: name → service → phone → date & time. " +
-            "Do **not** combine fields. The only allowed 'and' is **'date and time'** once in a single question. " +
-            "Avoid fillers—start directly with the question (e.g., 'What’s your name?'). " +
+            "Stay warm, slightly upbeat, and brief. **Ask for exactly ONE field** now—" +
+            "**name** → **service** → **phone** → **date & time**. " +
+            "Never combine fields in one sentence. The ONLY allowed pair is date & time as a single question. " +
             "If the caller provided all required info (name, service, phone, date & time), call `book_appointment`. " +
             "If they ask about availability, call `list_appointments`. " +
             "For rescheduling/canceling, confirm name and the date/time to change, then proceed. " +
-            "Only discuss mobile pet grooming topics. " +
-            "Only mention prices/services/areas if the caller asks.",
+            "Only discuss mobile pet grooming topics.",
         },
       });
-
-      // After first bot reply, relax to normal thresholds
-      firstTurn = false;
-
       resetUserCapture();
     }
   }
@@ -528,7 +438,12 @@ wss.on("connection", (twilioWS) => {
   async function handleListAppointments(args) {
     const { day, date_iso } = args || {};
     let target = date_iso ? new Date(date_iso) : new Date();
-    if (!date_iso && day === "tomorrow") target.setDate(target.getDate() + 1);
+
+    if (!date_iso && day === "tomorrow") {
+      target.setDate(target.getDate() + 1);
+    }
+    // today/default handled implicitly
+
     try {
       const items = await listEventsOn(target.toISOString());
       return {
@@ -569,7 +484,9 @@ wss.on("connection", (twilioWS) => {
     }
 
     const start = new Date(start_iso);
-    if (isNaN(start.getTime())) return { ok: false, error: "Invalid start time." };
+    if (isNaN(start.getTime())) {
+      return { ok: false, error: "Invalid start time." };
+    }
     const end = new Date(start.getTime() + duration_min * 60 * 1000);
 
     const summary = `${service} — ${customer_name}`;
@@ -601,7 +518,7 @@ wss.on("connection", (twilioWS) => {
 
   // ---------- OpenAI socket ----------
   openaiWS.on("open", () => {
-    console.log("[OpenAI] WS open");
+    console.log("[OpenAI] WS open]");
     // Configure to be reactive; our VAD drives turns.
     safeSendOpenAI({
       type: "session.update",
@@ -610,6 +527,7 @@ wss.on("connection", (twilioWS) => {
         voice: "alloy",
         output_audio_format: "g711_ulaw",
         input_audio_format: "g711_ulaw",
+
         tools: [
           {
             type: "function",
@@ -647,11 +565,12 @@ wss.on("connection", (twilioWS) => {
           }
         ],
         tool_choice: "auto",
+
         instructions: INSTRUCTIONS,
       },
     });
 
-    // ✅ Flush queued items
+    while (openaiOutbox.length) openaiWS.send(openaiWS.outbox.shift());
     while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
   });
 
@@ -665,17 +584,12 @@ wss.on("connection", (twilioWS) => {
     function getEntryByAnyId({ call_id, item_id, id }) { const ids=[call_id,item_id,id].filter(Boolean); for (const k of ids){ if (openaiWS._toolCalls[k]) return {key:k,entry:openaiWS._toolCalls[k]}; const a=openaiWS._toolIdAlias[k]; if (a && openaiWS._toolCalls[a]) return {key:a,entry:openaiWS._toolCalls[a]}; } return null; }
     function ensureEntry(key, name) { if (!key) return null; openaiWS._toolCalls[key] = openaiWS._toolCalls[key] || { name, argsText: "" }; if (name && !openaiWS._toolCalls[key].name) openaiWS._toolCalls[key].name = name; return openaiWS._toolCalls[key]; }
 
-    const NOISY_TYPES = new Set([
-      "response.audio_transcript.delta",
-      "response.output_text.delta",
-      "response.output_audio.delta",
-      "response.audio.delta"
-    ]);
+    const NOISY_TYPES = new Set(["response.audio_transcript.delta","response.output_audio.delta","response.audio.delta"]);
     if (!NOISY_TYPES.has(msg.type)) console.log("[OpenAI EVENT]", msg.type);
 
     // ====== AUDIO STREAMING ======
     if (msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") {
-      if (!isAssistantSpeaking) assistantUtterance = "";
+      if (!isAssistantSpeaking) assistantUtterance = ""; // reset at start of speaking
       isAssistantSpeaking = true;
       const payload = msg.audio || msg.delta;
       sendMulawToTwilio(payload);
@@ -687,15 +601,21 @@ wss.on("connection", (twilioWS) => {
       return;
     }
 
-    // ====== DOUBLE-QUESTION GUARDS on transcript OR text ======
-    if (msg.type === "response.audio_transcript.delta" || msg.type === "response.output_text.delta") {
-      const piece = msg.delta || msg.text || msg.output_text || "";
+    // NEW: Monitor the model's spoken transcript to prevent double-questions
+    if (msg.type === "response.audio_transcript.delta") {
+      const piece = msg.delta || "";
       if (piece) {
         assistantUtterance += piece;
-        const res = isDisallowedDoubleQuestion(assistantUtterance);
-        if (res.disallowed) {
-          console.log("[Guard] Double-question detected; enforcing single ask:", res.prefer);
-          reAskSingleField(res.prefer);
+        if (isDisallowedDoubleQuestion(assistantUtterance)) {
+          console.log("[Guard] Detected double-question, re-asking single field");
+          // Heuristics: prefer 'name' over 'service', and 'phone' over 'date/time'
+          const s = assistantUtterance.toLowerCase();
+          const askName = s.includes("name") && s.includes("service");
+          const askPhone = (s.includes("phone") || s.includes("phone number")) &&
+                           (s.includes("date") || s.includes("day") || s.includes("time"));
+          if (askName) reAskSingleField("name");
+          else if (askPhone) reAskSingleField("phone");
+          else reAskSingleField(""); // fallback: generic single-field ask
           assistantUtterance = "";
         }
       }
@@ -706,13 +626,7 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
       assistantUtterance = "";
-
-      // If this was the greeting, start a short cooldown so we WAIT for caller speech
-      if (greetingInFlight) {
-        greetingInFlight = false;
-        postGreetingUntilTs = Date.now() + POST_GREETING_COOLDOWN_MS;
-      }
-
+      if (greetingInFlight) greetingInFlight = false;
       if (!userSpeechActive) {
         safeSendOpenAI({ type: "input_audio_buffer.clear" });
       }
@@ -788,7 +702,7 @@ wss.on("connection", (twilioWS) => {
       delete openaiWS._toolCalls[callId];
     }
 
-    // (tool streaming handlers)
+    // (tool streaming handlers unchanged)
     if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
       const { id: itemId, name, arguments: chunk } = msg.item;
       console.log("[TOOL START]", name, "call_id=", itemId);
@@ -852,29 +766,18 @@ wss.on("connection", (twilioWS) => {
 
       resetUserCapture();
 
-      // AI does the greeting, exactly once
+      // Your exact greeting
       greetingInFlight = true;
-      openaiWS.readyState === WebSocket.OPEN
-        ? safeSendOpenAI({
-            type: "response.create",
-            response: {
-              modalities: ["audio", "text"],
-              conversation: "auto",
-              instructions:
-                "Say exactly: 'hello thank you for calling Furry Land Mobile Grooming, How can i help you today?'"
-            },
-          })
-        : openaiOutbox.push(JSON.stringify({
-            type: "response.create",
-            response: {
-              modalities: ["audio", "text"],
-              conversation: "auto",
-              instructions:
-                "Say exactly: 'hello thank you for calling Furry Land Mobile Grooming, How can i help you today?'"
-            },
-          }));
-
-      awaitingResponse = true; // block any concurrent response.create while greeting plays
+      safeSendOpenAI({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          conversation: "auto",
+          instructions:
+            "Say exactly: 'Thank you for calling Mobile Pet Grooming, How can I help you today?'"
+        },
+      });
+      awaitingResponse = true;
       return;
     }
 
