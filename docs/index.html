@@ -23,7 +23,7 @@
   }
   header{
     padding:18px 20px;border-bottom:1px solid #1d2030;background:var(--panel);
-    display:flex;gap:14px;align-items:center;flex-wrap:wrap;position:sticky;top:0;z-index:3;
+    display:flex;gap:14px;align-items:center;flex-wrap:wrap;position:top:0;z-index:3;
   }
   header h1{font-size:16px;margin:0 10px 0 0;letter-spacing:.2px;opacity:.95}
   .row{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
@@ -76,9 +76,13 @@
   .slot{
     border-bottom:1px solid var(--grid);cursor:pointer;position:relative;
   }
-  .slot:hover{background:#151a2a}
-  .slot.active{background:linear-gradient(180deg,#213259,#1e2b49);border-color:#364874;box-shadow:inset 0 0 0 1px #3c5aa9}
-  .slot.blocked{background:#1a171a;color:#d9a2a2;cursor:not-allowed;opacity:.55}
+  .slot:hover{ background:#2a1515; }
+  .slot.active {
+    background: linear-gradient(180deg, #5a1c1c, #3d0f0f); /* red tones */
+    border-color: #7e303a;
+    box-shadow: inset 0 0 0 1px #a33b3b;
+  }
+  .slot.blocked{background:#2a1515;color:#d9a2a2;cursor:not-allowed;opacity:.55}
   .tag{
     position:absolute;right:6px;top:2px;font-size:10px;color:#cfe3ff;opacity:.8
   }
@@ -100,6 +104,11 @@
   .legend .chip{display:inline-flex;align-items:center;gap:6px}
   .legend .dot{width:14px;height:14px;border-radius:4px;display:inline-block;background:#213259;border:1px solid #3c5aa9}
   .legend .dot.block{background:#4a1c22;border-color:#7e303a}
+  /* red chip for "Unavailable slot" */
+  .legend .dot.unavail{
+    background:#5a1c1c;
+    border-color:#a33b3b;
+  }
   footer{
     max-width:1280px;margin:12px auto 28px;padding:0 18px;color:var(--muted);display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap
   }
@@ -114,20 +123,83 @@
   border-top:1px solid #22263b;
   background:#131722;
 }
-.month-dow div{
-  text-align:center;
-  padding:8px 0;
-  font-weight:600;
-  color:var(--muted);
+  /* weekday header buttons */
+.month-dow .dow-btn{
+  width:100%;
+  background:#0f1220;
+  color:#cfd6ea;
+  border:none;
   border-right:1px solid #22263b;
   border-bottom:1px solid #22263b;
+  padding:8px 0;
+  font-weight:600;
+  cursor:pointer;
 }
+.month-dow .dow-btn:hover{ background:#151a24; }
+.month-dow .dow-btn.active{ background:#1b2240; color:#fff; }
   /* === App shell (sidebar + content) === */
 .app{
   display:grid;
   grid-template-columns: 240px 1fr;
   min-height:100vh;
 }
+
+/* --- Week header polish --- */
+.week .day-head{
+  display:flex;
+  flex-direction:column;
+  align-items:center;
+  justify-content:center;
+  gap:2px;
+  padding:10px 8px;
+  background:#111626;            /* darker than the grid so it pops */
+  border-left:1px solid #1f2436;
+  border-bottom:1px solid #1f2436;
+  position:sticky; top:0; z-index:3;
+}
+
+.week .day-head .dow{
+  font-size:11px;
+  letter-spacing:.4px;
+  text-transform:uppercase;
+  font-weight:700;
+  color:#b8c4dc;                 /* softer, not pure white */
+  opacity:.95;
+}
+
+.week .day-head .date{
+  font-size:13px;
+  font-weight:800;
+  color:#e7ecf7;
+}
+
+/* highlight today’s column header */
+.week .day-head.today{
+  background:#1a2242;
+  box-shadow: inset 0 -2px 0 0 var(--accent);
+}
+
+/* make weekends slightly dimmer */
+.week .day-head.weekend .dow{
+  color:#9aa6c0;
+  opacity:.9;
+}
+
+/* left time column slightly darker so the header strip lines up nicely */
+.week .time-col{
+  background:#0f1324;
+  border-right:1px solid #1f2436;
+}
+
+/* subtle sticky shadow under the header strip */
+.week .day-head::after{
+  content:"";
+  position:absolute;
+  left:0; right:0; bottom:-1px; height:1px;
+  background:linear-gradient(to bottom, rgba(0,0,0,.35), rgba(0,0,0,0));
+  pointer-events:none;
+}
+  
 @media (max-width: 960px){
   .app{ grid-template-columns: 1fr; }
   .sidebar{ position:sticky; top:0; z-index:5; }
@@ -160,10 +232,6 @@
 
   <div class="app">
   <aside class="sidebar">
-    <div class="brand">
-      <span class="logo">💈</span>
-      <strong>Barber AI</strong>
-    </div>
     <nav class="nav">
       <button class="nav-item active" data-view="scheduling">Scheduling</button>
       <button class="nav-item" data-view="greeting">Greeting</button>
@@ -178,32 +246,13 @@
   <section class="view" data-view="scheduling">
 
 <header>
-    <h1>Barber AI – Scheduling Controls</h1>
     <div class="row">
-      <div class="ctrl">
-        <label>Slot length</label>
-        <select id="slotLen">
-          <option value="15">15 min</option>
-          <option value="20">20 min</option>
-          <option value="30" selected>30 min</option>
-          <option value="60">60 min</option>
-        </select>
-      </div>
       <div class="ctrl">
         <label>Business hours</label>
         <div class="row" style="gap:6px">
           <input id="startHour" type="time" value="09:00">
           <input id="endHour" type="time" value="18:00">
         </div>
-      </div>
-      <div class="row">
-        <button class="secondary" id="prevWeekBtn">◀ Prev Week</button>
-        <button class="secondary" id="nextWeekBtn">Next Week ▶</button>
-        <button id="resetWeekBtn">Clear Week</button>
-      </div>
-      <div class="row">
-        <button class="secondary" id="exportBtn" title="Copy JSON">Export</button>
-        <button class="secondary" id="showImport">Import</button>
       </div>
     </div>
   </header>
@@ -213,15 +262,22 @@
     <header>
       <h2>Weekly Availability</h2>
       <div class="legend">
-        <span class="chip"><span class="dot"></span> Available slot</span>
+        <span class="chip"><span class="dot unavail"></span> Unavailable slot</span>
         <span class="chip"><span class="dot block"></span> Blackout day</span>
+      </div>
+      <!-- NEW: week controls styled like the month controls -->
+      <div class="month-controls" id="weekControls">
+        <button class="secondary" id="prevWeek">◀</button>
+        <div id="weekTitle" class="hint">Week</div>
+        <button class="secondary" id="nextWeek">▶</button>
+        <button class="danger" id="clearWeek">Clear All</button>
       </div>
     </header>
     <div class="week-wrap">
       <div id="week" class="week"></div>
     </div>
     <div style="padding:10px 14px;border-top:1px solid #21263a" class="hint">
-      Tip: Click or click-drag to toggle availability. Blackout days (from the month view) are disabled here.
+      Tip: Click or click-drag to mark times you are <b>unavailable</b>. Blackout days (from the month view) are disabled here.
     </div>
   </section>
 
@@ -280,18 +336,9 @@
 
 <footer>
   <div>
-    <div class="hint">Data auto-saves in your browser. Use Export/Import to move it to another device or send to your backend.</div>
+    <div class="hint">Data auto-saves in your browser.</div>
   </div>
 </footer>
-
-<section style="max-width:1280px;margin:0 auto;padding:0 18px 28px;display:none" id="importBox">
-  <h3>Import JSON</h3>
-  <textarea id="import"></textarea>
-  <div class="inline-actions" style="margin-top:8px">
-    <button id="doImport">Import</button>
-    <button class="secondary" id="cancelImport">Cancel</button>
-  </div>
-</section>
 
 <script>
 /* ---------- Utilities ---------- */
@@ -315,7 +362,7 @@ function tzLocalISO(date){ // yyyy-mm-ddTHH:MM (local)
 /* ---------- State ---------- */
 const storeKey = "barber_gui_state_v1";
 let state = {
-  slotLen: 30,
+  slotLen: 15,
   start: "09:00",
   end: "18:00",
   // availability: { 'YYYY-MM-DD': { 'HH:MM': true, ... } }
@@ -347,13 +394,13 @@ function load(){
 load();
 
 /* ---------- DOM refs ---------- */
-const slotLenSel = document.getElementById('slotLen');
 const startHour = document.getElementById('startHour');
 const endHour = document.getElementById('endHour');
 const weekEl = document.getElementById('week');
-const prevWeekBtn = document.getElementById('prevWeekBtn');
-const nextWeekBtn = document.getElementById('nextWeekBtn');
-const resetWeekBtn = document.getElementById('resetWeekBtn');
+const prevWeek = document.getElementById('prevWeek');
+const nextWeek = document.getElementById('nextWeek');
+const clearWeek = document.getElementById('clearWeek');
+const weekTitle = document.getElementById('weekTitle');
 const todayBtn = document.getElementById('todayBtn');
 
 const monTitle = document.getElementById('monTitle');
@@ -361,13 +408,6 @@ const monthEl = document.getElementById('month');
 const prevMon = document.getElementById('prevMon');
 const nextMon = document.getElementById('nextMon');
 const clearBlackouts = document.getElementById('clearBlackouts');
-
-const exportBtn = document.getElementById('exportBtn');
-const showImport = document.getElementById('showImport');
-const importBox = document.getElementById('importBox');
-const importTxt = document.getElementById('import');
-const doImport = document.getElementById('doImport');
-const cancelImport = document.getElementById('cancelImport');
 
 
   /* === Left-nav view router === */
@@ -389,7 +429,6 @@ showView((location.hash && location.hash.slice(1)) || 'scheduling');
 window.addEventListener('hashchange', ()=> showView(location.hash.slice(1) || 'scheduling'));
 
 /* ---------- Init controls ---------- */
-slotLenSel.value = String(state.slotLen);
 startHour.value = state.start;
 endHour.value   = state.end;
 
@@ -402,9 +441,19 @@ function formatTime12h(hours, minutes = 0) {
   return `${h}:${m} ${ampm}`;
 }
 
+  /* ---------- helper for formatting ---------- */
+  function formatWeekRangeLabel(weekStartDate){
+  const start = new Date(weekStartDate);
+  const end = addMinutes(start, 6*24*60); // +6 days
+  const opts = { month:'short', day:'numeric' };
+  const s = start.toLocaleDateString(undefined, opts);
+  const e = end.toLocaleDateString(undefined, opts);
+  return `${s} – ${e}`;
+}
+
 /* ---------- Week view rendering ---------- */
 function renderWeek(){
-  const slot = Number(state.slotLen);
+  const slot = 15;   
   const [sh, sm] = state.start.split(':').map(Number);
   const [eh, em] = state.end.split(':').map(Number);
 
@@ -414,6 +463,9 @@ function renderWeek(){
 
   const rows = Math.ceil((endMins-startMins)/slot);
   const days = Array.from({length:7},(_,i)=> addMinutes(state.weekCursor, i*24*60));
+  if (weekTitle) {
+    weekTitle.textContent = formatWeekRangeLabel(state.weekCursor);
+  }
   weekEl.innerHTML = "";
   weekEl.style.gridTemplateRows = `40px repeat(${rows}, 20px)`;
   
@@ -520,12 +572,45 @@ function renderWeek(){
   });
 }
 
-function toggleSlot(dateStr, timeStr, on){
+function toggleSlot(dateStr, timeStr, isUnavailable){
   state.availability[dateStr] = state.availability[dateStr] || {};
-  if (on) state.availability[dateStr][timeStr] = true;
+  if (isUnavailable) state.availability[dateStr][timeStr] = true;
   else delete state.availability[dateStr][timeStr];
-  // cleanup
   if (Object.keys(state.availability[dateStr]).length===0) delete state.availability[dateStr];
+}
+
+  function toggleWeekdayForMonth(dow){
+  const cur = state.monthCursor;
+  const y = cur.getFullYear();
+  const m = cur.getMonth();
+  const last = new Date(y, m + 1, 0).getDate(); // last day in month (1..28/29/30/31)
+
+  // Collect all dates in this month that match the weekday
+  const keys = [];
+  for(let day=1; day<=last; day++){
+    const d = new Date(y, m, day);
+    if (d.getDay() === dow) keys.push(fmtDate(d));
+  }
+
+  // If *every* matching day is already blacked out, we will un-block; otherwise, block all.
+  const allBlocked = keys.every(k => !!state.blackoutDays[k]);
+  const willBlock = !allBlocked;
+
+  if (willBlock) {
+    for (const k of keys) {
+      state.blackoutDays[k] = true;
+      delete state.availability[k]; // wipe availability on those days
+    }
+  } else {
+    for (const k of keys) {
+      delete state.blackoutDays[k];
+      // (leave availability alone on un-block; user can toggle slots)
+    }
+  }
+
+  save();
+  renderMonth();
+  renderWeek();
 }
 
 /* ---------- Month view rendering ---------- */
@@ -536,13 +621,18 @@ function renderMonth(){
   const first = new Date(y,m,1);
   monTitle.textContent = first.toLocaleString(undefined,{month:'long', year:'numeric'});
 
-  // draw weekday header (Mon–Sun to match Monday-start grid)
+  // draw weekday header (Sun–Sat) as buttons
   const dowHdr = document.getElementById('monthDow');
   dowHdr.innerHTML = "";
-  ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].forEach(txt=>{
-    const d = document.createElement('div');
-    d.textContent = txt;
-    dowHdr.appendChild(d);
+  ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"].forEach((txt, dow)=>{
+    const b = document.createElement('button');
+    b.type = "button";
+    b.className = "dow-btn";
+    b.textContent = txt;
+    b.dataset.dow = String(dow);     // 0..6
+    b.title = `Toggle all ${txt}s this month`;
+    b.addEventListener('click', ()=> toggleWeekdayForMonth(dow));
+    dowHdr.appendChild(b);
   });
 
   // start on Monday
@@ -580,9 +670,6 @@ function renderMonth(){
 }
 
 /* ---------- Wire controls ---------- */
-slotLenSel.addEventListener('change', e=>{
-  state.slotLen = Number(e.target.value); save(); renderWeek();
-});
 [startHour, endHour].forEach(inp=>{
   inp.addEventListener('change', ()=>{
     state.start = startHour.value;
@@ -591,17 +678,15 @@ slotLenSel.addEventListener('change', e=>{
   });
 });
 
-prevWeekBtn.addEventListener('click', ()=>{
-  state.weekCursor = addMinutes(state.weekCursor, -7*24*60); save(); renderWeek();
+prevWeek.addEventListener('click', ()=>{
+  state.weekCursor = addMinutes(state.weekCursor, -7*24*60);
+  save(); renderWeek();
 });
-nextWeekBtn.addEventListener('click', ()=>{
-  state.weekCursor = addMinutes(state.weekCursor, 7*24*60); save(); renderWeek();
+nextWeek.addEventListener('click', ()=>{
+  state.weekCursor = addMinutes(state.weekCursor, 7*24*60);
+  save(); renderWeek();
 });
- todayBtn.addEventListener('click', ()=>{
-  state.weekCursor = weekStart(new Date()); state.monthCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
-  save(); renderWeek(); renderMonth();
-});
-resetWeekBtn.addEventListener('click', ()=>{
+clearWeek.addEventListener('click', ()=>{
   const days = Array.from({length:7},(_,i)=> fmtDate(addMinutes(state.weekCursor, i*24*60)));
   days.forEach(d=> delete state.availability[d]);
   save(); renderWeek();
@@ -614,37 +699,6 @@ clearBlackouts.addEventListener('click', ()=>{
   save(); renderMonth(); renderWeek();
 });
 
-
-/* ---------- Export / Import ---------- */
-exportBtn.addEventListener('click', ()=>{
-  const payload = {
-    slotLen: state.slotLen,
-    start: state.start,
-    end: state.end,
-    availability: state.availability,
-    blackoutDays: state.blackoutDays
-  };
-  const text = JSON.stringify(payload, null, 2);
-  navigator.clipboard.writeText(text).catch(()=>{});
-  exportBtn.textContent = "Copied!";
-  setTimeout(()=> exportBtn.textContent = "Export", 900);
-});
-showImport.addEventListener('click', ()=>{ importBox.style.display = 'block'; importTxt.value = ''; });
-cancelImport.addEventListener('click', ()=>{ importBox.style.display = 'none'; });
-doImport.addEventListener('click', ()=>{
-  try{
-    const obj = JSON.parse(importTxt.value);
-    state.slotLen = Number(obj.slotLen) || state.slotLen;
-    state.start   = obj.start || state.start;
-    state.end     = obj.end   || state.end;
-    state.availability = obj.availability || {};
-    state.blackoutDays = obj.blackoutDays || {};
-    save(); renderWeek(); renderMonth();
-    importBox.style.display = 'none';
-  }catch(e){
-    alert("Invalid JSON");
-  }
-});
 
 /* ---------- First paint ---------- */
 renderWeek();
