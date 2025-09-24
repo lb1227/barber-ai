@@ -4,6 +4,14 @@ import { WebSocketServer, WebSocket } from "ws";
 import { getAuthUrl, handleOAuthCallback, whoAmI, listEventsToday, createEvent, listEventsOn } from "./gcal.js";
 import { URL } from "url";
 
+const ALLOW_ORIGIN = process.env.GUI_ORIGIN || "*"; // e.g. https://<user>.github.io
+
+// inside createServer handler, right after you get req/res:
+res.setHeader("Access-Control-Allow-Origin", ALLOW_ORIGIN);
+res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
+res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+if (req.method === "OPTIONS") { res.writeHead(204); return res.end(); }
+
 function parseToolArgs(maybeJSON) {
   try { return typeof maybeJSON === "string" ? JSON.parse(maybeJSON) : maybeJSON; }
   catch { return {}; }
