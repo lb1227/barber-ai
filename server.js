@@ -46,14 +46,18 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    // Parse URL & query safely (BASE_URL already defined in your file)
+    // Parse URL & query safely
     const fullUrl = new URL(req.url, BASE_URL);
     const path = fullUrl.pathname;
 
     // === Twilio voice ===
     if (path === "/voice") {
+      // Use Twilio to say the greeting EXACTLY, then start the media stream
       const twiml = `
         <Response>
+          <Say>
+            hello thank you for calling Furry Land Mobile Grooming, How can i help you today?
+          </Say>
           <Connect>
             <Stream url="${BASE_URL.replace(/^https?/, "wss")}/media" track="inbound_track"/>
           </Connect>
@@ -162,13 +166,12 @@ server.on("upgrade", (req, socket, head) => {
 
 // ---------- Helpers: μ-law decode + RMS ----------
 function muLawByteToPcm16(u) {
-  // μ-law decode (G.711) – returns int16
   u = ~u & 0xff;
   const sign = u & 0x80;
   let exponent = (u >> 4) & 0x07;
   let mantissa = u & 0x0f;
   let sample = ((mantissa << 4) + 0x08) << (exponent + 3);
-  sample -= 0x84; // bias
+  sample -= 0x84;
   return sign ? -sample : sample;
 }
 
@@ -178,7 +181,6 @@ function rmsOfMuLawBase64(b64) {
     const len = buf.length;
     if (!len) return 0;
     let sumSq = 0;
-    // Sample μ-law bytes sparsely if very large to save CPU
     const stride = len > 3200 ? Math.floor(len / 1600) : 1;
     let count = 0;
     for (let i = 0; i < len; i += stride) {
@@ -187,7 +189,6 @@ function rmsOfMuLawBase64(b64) {
       count++;
     }
     const meanSq = sumSq / Math.max(1, count);
-    // Normalize to ~0..1 from int16
     return Math.sqrt(meanSq) / 32768;
   } catch {
     return 0;
@@ -284,7 +285,7 @@ wss.on("connection", (twilioWS) => {
         Authorization: `Bearer ${OPENAI_API_KEY}`,
         "OpenAI-Beta": "realtime=v1",
         "x-openai-audio-output-format": "g711_ulaw",
-        "x-openai-audio-input-format":  "g711_ulaw;rate=8000", // 👈 REQUIRED
+        "x-openai-audio-input-format":  "g711_ulaw;rate=8000",
       },
     }
   );
@@ -294,11 +295,7 @@ wss.on("connection", (twilioWS) => {
     if (!twilioReady || !streamSid) return;
     if (msgObj?.event === "media" && !msgObj.streamSid) msgObj.streamSid = streamSid;
     if (twilioWS.readyState === WebSocket.OPEN) {
-      try {
-        twilioWS.send(JSON.stringify(msgObj));
-      } catch (err) {
-        console.error("[Twilio send error]", err);
-      }
+      try { twilioWS.send(JSON.stringify(msgObj)); } catch (err) { console.error("[Twilio send error]", err); }
     }
   };
 
@@ -306,11 +303,7 @@ wss.on("connection", (twilioWS) => {
   const safeSendOpenAI = (obj) => {
     const data = typeof obj === "string" ? obj : JSON.stringify(obj);
     if (openaiWS.readyState === WebSocket.OPEN) {
-      try {
-        openaiWS.send(data);
-      } catch (e) {
-        console.error("[OpenAI send error]", e);
-      }
+      try { openaiWS.send(data); } catch (e) { console.error("[OpenAI send error]", e); }
     } else {
       openaiOutbox.push(data);
     }
@@ -318,7 +311,7 @@ wss.on("connection", (twilioWS) => {
 
   // ---- Turn & VAD state machine ----
   let isAssistantSpeaking = false;
-  let awaitingResponse = false; // a response.create is in flight (e.g., greeting)
+  let awaitingResponse = false;
   let userSpeechActive = false;
   let userSpeechMs = 0;
   let silenceMs = 0;
@@ -329,7 +322,7 @@ wss.on("connection", (twilioWS) => {
   let capturedFrames = [];
   let sumLevel = 0;
   let levelCount = 0;
-  let greetingInFlight = false;
+  let greetingInFlight = false; // kept for compatibility (not used now)
 
   // Track assistant's text to guard against double-questions
   let assistantUtterance = "";
@@ -397,7 +390,6 @@ wss.on("connection", (twilioWS) => {
       return { disallowed: true, prefer: /name.*and.*service/.test(s) ? "name" : "phone" };
     }
 
-    // also catch the awkward "date & time ... and time" phrasing
     if (/\bdate\b.*\btime\b.*\band\b.*\btime\b/.test(s)) {
       return { disallowed: true, prefer: "date_time_simple" };
     }
@@ -431,7 +423,7 @@ wss.on("connection", (twilioWS) => {
   }
 
   function appendUserAudio(b64) {
-    // NEW: ignore any frames during the short post-greeting cooldown
+    // Ignore any frames during the short post-greeting cooldown
     if (Date.now() < postGreetingUntilTs) return;
 
     if (greetingInFlight) return;
@@ -478,7 +470,6 @@ wss.on("connection", (twilioWS) => {
     sumLevel += level;
     levelCount += 1;
 
-    // NEW: first-turn thresholds
     const minSpeechMs = firstTurn ? MIN_SPEECH_MS_FIRST : VAD.MIN_SPEECH_MS;
     const utteranceLongEnough = userSpeechMs >= minSpeechMs;
 
@@ -510,7 +501,6 @@ wss.on("connection", (twilioWS) => {
         response: {
           modalities: ["audio", "text"],
           conversation: "auto",
-          // Strong single-question directive every turn (+ no fillers)
           instructions:
             "Stay warm, slightly upbeat, and brief. Ask for **exactly ONE field** now in order: name → service → phone → date & time. " +
             "Do **not** combine fields. The only allowed 'and' is **'date and time'** once in a single question. " +
@@ -523,7 +513,6 @@ wss.on("connection", (twilioWS) => {
         },
       });
 
-      // NEW: after first assistant reply, further turns use normal thresholds
       firstTurn = false;
 
       resetUserCapture();
@@ -537,7 +526,6 @@ wss.on("connection", (twilioWS) => {
     if (!date_iso && day === "tomorrow") {
       target.setDate(target.getDate() + 1);
     }
-    // today/default handled implicitly
   
     try {
       const items = await listEventsOn(target.toISOString());
@@ -614,7 +602,6 @@ wss.on("connection", (twilioWS) => {
   // ---------- OpenAI socket ----------
   openaiWS.on("open", () => {
     console.log("[OpenAI] WS open");
-    // Configure to be reactive; our VAD drives turns.
     safeSendOpenAI({
       type: "session.update",
       session: {
@@ -663,7 +650,6 @@ wss.on("connection", (twilioWS) => {
       },
     });
 
-    // Correctly flush queued items
     while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
   });
 
@@ -715,8 +701,7 @@ wss.on("connection", (twilioWS) => {
       assistantUtterance = "";
       if (greetingInFlight) {
         greetingInFlight = false;
-        // NEW: start post-greeting cooldown to avoid immediate follow-up
-        postGreetingUntilTs = Date.now() + POST_GREETING_COOLDOWN_MS;
+        // (No AI greeting now)
       }
       if (!userSpeechActive) {
         safeSendOpenAI({ type: "input_audio_buffer.clear" });
@@ -857,18 +842,10 @@ wss.on("connection", (twilioWS) => {
 
       resetUserCapture();
 
-      // Your exact greeting
-      greetingInFlight = true;
-      safeSendOpenAI({
-        type: "response.create",
-        response: {
-          modalities: ["audio", "text"],
-          conversation: "auto",
-          instructions:
-            "Say exactly: 'hello thank you for calling Furry Land Mobile Grooming, How can i help you today?'"
-        },
-      });
-      awaitingResponse = true;
+      // Because Twilio already played the greeting before connecting the stream,
+      // just set the short cooldown so we don't react to line noise immediately.
+      postGreetingUntilTs = Date.now() + POST_GREETING_COOLDOWN_MS;
+
       return;
     }
 
