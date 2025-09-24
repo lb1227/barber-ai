@@ -199,14 +199,14 @@ const VAD = {
   FRAME_MS: 20,          // Twilio sends ~20ms frames
   RMS_START: 0.055,
   RMS_CONTINUE: 0.040,
-  MIN_SPEECH_MS: 260,    // was 320 (slightly quicker)
-  END_SILENCE_MS: 900,   // was 1200 (commit sooner)
-  BARGE_IN_MIN_MS: 120,  // was 150 (caller can interrupt a bit faster)
+  MIN_SPEECH_MS: 260,    // slightly quicker
+  END_SILENCE_MS: 900,   // commit sooner
+  BARGE_IN_MIN_MS: 120,  // caller can interrupt a bit faster
   MAX_TURN_DURATION_MS: 6000,
 };
 const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
 
-// === Identity, task & slightly more upbeat style ===
+// === Identity, task & single-question rules ===
 const INSTRUCTIONS =
   [
     "You are a **Mobile Pet Grooming Assistant** for a small business.",
@@ -218,22 +218,22 @@ const INSTRUCTIONS =
     "- Enthusiasm: **calm and positive**—sound welcoming, not flat.",
     "- Formality: **casual but slightly professional** (it’s a business).",
     "- Emotion: **appropriately expressive** and empathetic within normal workplace standards.",
-    "- Pacing: **slightly brisk**, like a natural human receptionist. Keep replies short (≈8–14 words), use contractions, and avoid long monologues. Ask **one question at a time**.",
+    "- Pacing: **slightly brisk**. Keep replies short (≈8–14 words) and avoid long monologues.",
+    "",
+    "# Single-question policy (STRICT)",
+    "- **Ask for exactly one field per turn**. Never combine fields in one question.",
+    "- The **only allowed pair** is **date & time** (asked as one question).",
+    "- Collect in this order: **name → service → phone → date & time**.",
+    "- After each answer, briefly acknowledge (e.g., 'Got it, thanks.') and move to the next field.",
     "",
     "# Interaction rules",
-    "1) Speak **clear American English** only. If the caller uses another language, say once: “Sorry—I only speak English,” then wait for English.",
-    "2) Ignore background noise, music, tones—respond **only to human speech**.",
-    "3) Be concise; **stop speaking immediately if interrupted** (barge-in friendly).",
-    "4) Always confirm critical details by repeating them back (names, phone numbers, dates/times).",
-    "5) When proposing availability, offer up to **two earliest viable options**.",
-    "6) **No live transfers**. Your goal is to complete bookings on the call.",
-    "7) Use the available tools (`list_appointments`, `book_appointment`) when appropriate. **Do not invent other tools.**",
-    "",
-    "# Data you should collect for bookings",
-    "- Caller name, **phone number**, service requested, preferred day/time; optional pet species/breed/size and notes.",
-    "",
-    "# After each question",
-    "- Ask only **one** question, then wait silently."
+    "1) Speak clear American English only. If another language is used, say once: “Sorry—I only speak English,” then wait.",
+    "2) Ignore background noise, music, tones—respond only to human speech.",
+    "3) Stop speaking immediately if interrupted (barge-in friendly).",
+    "4) Confirm critical details by repeating them back (names, phone numbers, dates/times).",
+    "5) Offer up to two earliest viable availability options when asked.",
+    "6) No live transfers. Finish bookings on the call.",
+    "7) Use the tools (`list_appointments`, `book_appointment`) appropriately. Do not invent other tools.",
   ].join("\n");
 
 // ---------- Main bridge ----------
@@ -301,6 +301,9 @@ wss.on("connection", (twilioWS) => {
   let levelCount = 0;
   let greetingInFlight = false;
 
+  // NEW: track the assistant's current utterance text so we can guard double-questions
+  let assistantUtterance = "";
+
   function resetUserCapture() {
     userSpeechActive = false;
     userSpeechMs = 0;
@@ -311,6 +314,37 @@ wss.on("connection", (twilioWS) => {
     capturedFrames = [];
     sumLevel = 0;
     levelCount = 0;
+  }
+
+  // --- simple detector for disallowed combined fields in one question
+  function isDisallowedDoubleQuestion(text) {
+    const s = (text || "").toLowerCase();
+    const mentions = (k) => s.includes(k);
+    const nameAndService = mentions("name") && mentions("service");
+    const phoneAndWhen = (mentions("phone") || mentions("phone number")) &&
+                         (mentions("date") || mentions("day") || mentions("time"));
+    const dateAndTimeOnly = (mentions("date") || mentions("day")) && mentions("time"); // allowed
+    if (dateAndTimeOnly && !phoneAndWhen) return false; // allow date+time
+    return nameAndService || phoneAndWhen;
+  }
+
+  function reAskSingleField(field) {
+    // Cancel current speech and re-ask ONLY the single field
+    if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
+    awaitingResponse = true;
+    const fieldPromptMap = {
+      name: "Ask only for the caller’s name. One short question. Don’t ask anything else.",
+      phone: "Ask only for the caller’s phone number. One short question. Don’t ask anything else.",
+    };
+    const instructions = fieldPromptMap[field] || "Ask only one question for the next missing field. Do not combine.";
+    safeSendOpenAI({
+      type: "response.create",
+      response: {
+        modalities: ["audio", "text"],
+        conversation: "auto",
+        instructions,
+      },
+    });
   }
 
   function appendUserAudio(b64) {
@@ -386,11 +420,12 @@ wss.on("connection", (twilioWS) => {
         response: {
           modalities: ["audio", "text"],
           conversation: "auto",
-          // Slightly brisk, brief replies
+          // Strong single-question directive every turn
           instructions:
-            "Stay warm, slightly upbeat, and **brief**. Keep replies to **one short sentence** (≈8–14 words), use contractions, and keep a **slightly brisk** pace. " +
-            "Ask exactly **one** concise question next. " +
-            "If the caller provided name, service, start time, and phone, call `book_appointment`. " +
+            "Stay warm, slightly upbeat, and brief. **Ask for exactly ONE field** now—" +
+            "**name** → **service** → **phone** → **date & time**. " +
+            "Never combine fields in one sentence. The ONLY allowed pair is date & time as a single question. " +
+            "If the caller provided all required info (name, service, phone, date & time), call `book_appointment`. " +
             "If they ask about availability, call `list_appointments`. " +
             "For rescheduling/canceling, confirm name and the date/time to change, then proceed. " +
             "Only discuss mobile pet grooming topics.",
@@ -535,7 +570,7 @@ wss.on("connection", (twilioWS) => {
       },
     });
 
-    while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
+    while (openaiOutbox.length) openaiWS.send(openaiWS.outbox.shift());
   });
 
   openaiWS.on("message", async (data) => {
@@ -551,21 +586,58 @@ wss.on("connection", (twilioWS) => {
     const NOISY_TYPES = new Set(["response.audio_transcript.delta","response.output_audio.delta","response.audio.delta"]);
     if (!NOISY_TYPES.has(msg.type)) console.log("[OpenAI EVENT]", msg.type);
 
+    // ====== AUDIO STREAMING ======
     if (msg.type === "response.audio.delta" || msg.type === "response.output_audio.delta") {
+      if (!isAssistantSpeaking) assistantUtterance = ""; // reset at start of speaking
       isAssistantSpeaking = true;
       const payload = msg.audio || msg.delta;
       sendMulawToTwilio(payload);
       return;
     }
-    if (msg.type === "response.audio.done") { isAssistantSpeaking = false; return; }
+    if (msg.type === "response.audio.done") {
+      isAssistantSpeaking = false;
+      assistantUtterance = "";
+      return;
+    }
+
+    // NEW: Monitor the model's spoken transcript to prevent double-questions
+    if (msg.type === "response.audio_transcript.delta") {
+      const piece = msg.delta || "";
+      if (piece) {
+        assistantUtterance += piece;
+        if (isDisallowedDoubleQuestion(assistantUtterance)) {
+          console.log("[Guard] Detected double-question, re-asking single field");
+          // Heuristics: prefer 'name' over 'service', and 'phone' over 'date/time'
+          const s = assistantUtterance.toLowerCase();
+          const askName = s.includes("name") && s.includes("service");
+          const askPhone = (s.includes("phone") || s.includes("phone number")) &&
+                           (s.includes("date") || s.includes("day") || s.includes("time"));
+          if (askName) reAskSingleField("name");
+          else if (askPhone) reAskSingleField("phone");
+          else reAskSingleField(""); // fallback: generic single-field ask
+          assistantUtterance = "";
+        }
+      }
+      return;
+    }
+
     if (msg.type === "response.done") {
       isAssistantSpeaking = false;
       awaitingResponse = false;
+      assistantUtterance = "";
       if (greetingInFlight) greetingInFlight = false;
-      if (!userSpeechActive) safeSendOpenAI({ type: "input_audio_buffer.clear" });
+      if (!userSpeechActive) {
+        safeSendOpenAI({ type: "input_audio_buffer.clear" });
+      }
       return;
     }
-    if (msg.type === "error") { console.error("[OpenAI ERROR]", msg); isAssistantSpeaking = false; awaitingResponse = false; return; }
+    if (msg.type === "error") {
+      console.error("[OpenAI ERROR]", msg);
+      isAssistantSpeaking = false;
+      awaitingResponse = false;
+      assistantUtterance = "";
+      return;
+    }
 
     function isBookingArgs(args) { return !!(args && args.customer_name && args.service && args.start_iso && args.phone); }
     function isListArgs(args) { return !!(args && (args.day || args.date_iso)); }
@@ -592,7 +664,7 @@ wss.on("connection", (twilioWS) => {
               modalities: ["audio", "text"],
               conversation: "auto",
               instructions:
-                "Warm and slightly upbeat: ask exactly one question — “What’s the best phone number to reach you?” Then wait silently."
+                "Ask only one question: “What’s the best phone number to reach you?” Then wait silently.",
             }
           });
           return;
@@ -621,7 +693,7 @@ wss.on("connection", (twilioWS) => {
           conversation: "auto",
           instructions:
             effectiveName === "book_appointment"
-              ? "Warmly confirm the booking details (time, service) in one short sentence. If it failed, briefly explain and offer the next two options."
+              ? "Warmly confirm the booking details in one short sentence. If it failed, briefly explain and offer the next two options."
               : "Summarize the schedule for that day in one short, friendly sentence. If none or error, say so briefly.",
         },
       });
@@ -629,6 +701,7 @@ wss.on("connection", (twilioWS) => {
       delete openaiWS._toolCalls[callId];
     }
 
+    // (tool streaming handlers unchanged)
     if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
       const { id: itemId, name, arguments: chunk } = msg.item;
       console.log("[TOOL START]", name, "call_id=", itemId);
@@ -692,7 +765,7 @@ wss.on("connection", (twilioWS) => {
 
       resetUserCapture();
 
-      // Updated greeting per your exact text
+      // Your exact greeting
       greetingInFlight = true;
       safeSendOpenAI({
         type: "response.create",
