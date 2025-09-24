@@ -197,16 +197,16 @@ function rmsOfMuLawBase64(b64) {
 // ---------- Conversation policies (tunable) ----------
 const VAD = {
   FRAME_MS: 20,          // Twilio sends ~20ms frames
-  RMS_START: 0.055,      // was 0.04
-  RMS_CONTINUE: 0.040,   // was 0.03
-  MIN_SPEECH_MS: 320,    // was 200ms
-  END_SILENCE_MS: 1200,  // was 1000
-  BARGE_IN_MIN_MS: 150,  // speak ≥150ms to barge-in
+  RMS_START: 0.055,
+  RMS_CONTINUE: 0.040,
+  MIN_SPEECH_MS: 260,    // was 320 (slightly quicker)
+  END_SILENCE_MS: 900,   // was 1200 (commit sooner)
+  BARGE_IN_MIN_MS: 120,  // was 150 (caller can interrupt a bit faster)
   MAX_TURN_DURATION_MS: 6000,
 };
 const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
 
-// === UPDATED IDENTITY, TASK & TONE ===
+// === Identity, task & slightly more upbeat style ===
 const INSTRUCTIONS =
   [
     "You are a **Mobile Pet Grooming Assistant** for a small business.",
@@ -214,11 +214,11 @@ const INSTRUCTIONS =
     "Scope guard: **only** discuss topics related to mobile pet grooming. If asked something unrelated, politely steer back to grooming and booking.",
     "",
     "# Style",
-    "- Tone: **warm and conversational**.",
-    "- Enthusiasm: **calm but upbeat**—never robotic or flat.",
+    "- Tone: **warm, conversational, and slightly upbeat** (friendly but not bubbly).",
+    "- Enthusiasm: **calm and positive**—sound welcoming, not flat.",
     "- Formality: **casual but slightly professional** (it’s a business).",
     "- Emotion: **appropriately expressive** and empathetic within normal workplace standards.",
-    "- Pacing: **normal human conversation**; avoid long monologues. Ask **one question at a time**.",
+    "- Pacing: **slightly brisk**, like a natural human receptionist. Keep replies short (≈8–14 words), use contractions, and avoid long monologues. Ask **one question at a time**.",
     "",
     "# Interaction rules",
     "1) Speak **clear American English** only. If the caller uses another language, say once: “Sorry—I only speak English,” then wait for English.",
@@ -386,12 +386,13 @@ wss.on("connection", (twilioWS) => {
         response: {
           modalities: ["audio", "text"],
           conversation: "auto",
-          // keep single-question behavior; route to tools when ready
+          // Slightly brisk, brief replies
           instructions:
-            "Stay warm and conversational. Ask exactly **one** concise question next. " +
-            "If the caller provided name, service, start time, and phone, call the tool named `book_appointment` exactly. " +
-            "If the caller asks about schedule/availability for a given day, call `list_appointments`. " +
-            "For rescheduling/canceling, first confirm the name and the date/time they want to change, then proceed as appropriate. " +
+            "Stay warm, slightly upbeat, and **brief**. Keep replies to **one short sentence** (≈8–14 words), use contractions, and keep a **slightly brisk** pace. " +
+            "Ask exactly **one** concise question next. " +
+            "If the caller provided name, service, start time, and phone, call `book_appointment`. " +
+            "If they ask about availability, call `list_appointments`. " +
+            "For rescheduling/canceling, confirm name and the date/time to change, then proceed. " +
             "Only discuss mobile pet grooming topics.",
         },
       });
@@ -482,7 +483,7 @@ wss.on("connection", (twilioWS) => {
 
   // ---------- OpenAI socket ----------
   openaiWS.on("open", () => {
-    console.log("[OpenAI] WS open");
+    console.log("[OpenAI] WS open]");
     // Configure to be reactive; our VAD drives turns.
     safeSendOpenAI({
       type: "session.update",
@@ -591,7 +592,7 @@ wss.on("connection", (twilioWS) => {
               modalities: ["audio", "text"],
               conversation: "auto",
               instructions:
-                "Warm and conversational: ask exactly one question — “What’s the best phone number to reach you?” Then wait silently."
+                "Warm and slightly upbeat: ask exactly one question — “What’s the best phone number to reach you?” Then wait silently."
             }
           });
           return;
@@ -620,8 +621,8 @@ wss.on("connection", (twilioWS) => {
           conversation: "auto",
           instructions:
             effectiveName === "book_appointment"
-              ? "Warmly confirm the booking details (time, service). If it failed, briefly explain and offer the next two options."
-              : "Summarize the schedule for that day in a friendly, concise way. If none or error, say so briefly.",
+              ? "Warmly confirm the booking details (time, service) in one short sentence. If it failed, briefly explain and offer the next two options."
+              : "Summarize the schedule for that day in one short, friendly sentence. If none or error, say so briefly.",
         },
       });
 
@@ -691,7 +692,7 @@ wss.on("connection", (twilioWS) => {
 
       resetUserCapture();
 
-      // UPDATED greeting for Mobile Pet Grooming Assistant
+      // Updated greeting per your exact text
       greetingInFlight = true;
       safeSendOpenAI({
         type: "response.create",
