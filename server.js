@@ -570,7 +570,7 @@ wss.on("connection", (twilioWS) => {
       },
     });
 
-    while (openaiOutbox.length) openaiWS.send(openaiWS.outbox.shift());
+    while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
   });
 
   openaiWS.on("message", async (data) => {
