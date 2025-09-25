@@ -498,7 +498,7 @@ wss.on("connection", (twilioWS) => {
       type: "session.update",
       session: {
         modalities: ["text", "audio"],
-        voice: "alloy",
+        voice: "verse",
         output_audio_format: "g711_ulaw",
         input_audio_format: "g711_ulaw",
 
