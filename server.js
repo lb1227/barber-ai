@@ -305,6 +305,8 @@ wss.on("connection", (twilioWS) => {
   let assistantUtterance = "";         // live transcript during assistant speech
   let sawQuestionStart = false;        // (kept for compatibility; not used by simplified guard)
   let singleQuestionCutApplied = false;// (kept for compatibility)
+  // NEW: defer-cancel timer to avoid clipping the question audio
+  let questionCutTimer = null;
 
   function resetUserCapture() {
     userSpeechActive = false;
@@ -606,6 +608,8 @@ wss.on("connection", (twilioWS) => {
     }
     if (msg.type === "response.audio.done") {
       isAssistantSpeaking = false;
+      // NEW: clear any pending deferred cancel
+      if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
       // reset any partial line we were analyzing
       assistantUtterance = "";
       sawQuestionStart = false;
@@ -643,7 +647,7 @@ wss.on("connection", (twilioWS) => {
       return;
     }
 
-    // 2) After greeting, enforce single-question cutoff (cut only at the first '?')
+    // 2) After greeting, enforce single-question cutoff (defer cancel ~400ms after first '?')
     if (
       (msg.type === "response.audio_transcript.delta" || msg.type === "response.output_text.delta") &&
       !greetingInFlight
@@ -652,15 +656,18 @@ wss.on("connection", (twilioWS) => {
       if (piece) {
         assistantUtterance += piece;
 
-        // IMPORTANT: don't cancel mid-sentence. We only stop after the first question mark.
-        if (assistantUtterance.includes("?")) {
-          console.log("[Guard] first question ended (‘?’) → stop this turn");
-          safeSendOpenAI({ type: "response.cancel" });
-          awaitingResponse = false;      // let VAD capture the caller next
-          assistantUtterance = "";       // reset guard buffer
-          sawQuestionStart = false;
-          singleQuestionCutApplied = true;
-          return;
+        // IMPORTANT: don't cancel mid-sentence.
+        // Schedule a cancel ~400ms AFTER the first '?' so the audio can finish naturally.
+        if (assistantUtterance.includes("?") && !questionCutTimer) {
+          questionCutTimer = setTimeout(() => {
+            console.log("[Guard] first question ended (‘?’) → stop this turn (deferred)");
+            safeSendOpenAI({ type: "response.cancel" });
+            awaitingResponse = false;      // let VAD capture the caller next
+            assistantUtterance = "";       // reset guard buffer
+            sawQuestionStart = false;
+            singleQuestionCutApplied = true;
+            questionCutTimer = null;
+          }, 400); // defer just enough to let the TTS finish the question
         }
       }
       return;
@@ -669,6 +676,9 @@ wss.on("connection", (twilioWS) => {
     if (msg.type === "response.done") {
       isAssistantSpeaking = false;
       awaitingResponse = false;
+
+      // NEW: clear any pending deferred cancel
+      if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
 
       if (greetingInFlight) {
         greetingInFlight = false;
@@ -688,6 +698,10 @@ wss.on("connection", (twilioWS) => {
       console.error("[OpenAI ERROR]", msg);
       isAssistantSpeaking = false;
       awaitingResponse = false;
+
+      // NEW: clear any pending deferred cancel
+      if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
+
       assistantUtterance = "";
       sawQuestionStart = false;
       singleQuestionCutApplied = false;
