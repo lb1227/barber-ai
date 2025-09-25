@@ -201,7 +201,7 @@ const VAD = {
   RMS_CONTINUE: 0.040,
   MIN_SPEECH_MS: 260,    // was 320 (slightly quicker)
   END_SILENCE_MS: 900,   // was 1200 (commit sooner)
-  BARGE_IN_MIN_MS: 120,  // was 150 (caller can interrupt a bit faster)
+  BARGE_IN_MIN_MS: 260,  // ↑ was 120 — reduce accidental mid-sentence cancels
   MAX_TURN_DURATION_MS: 6000,
 };
 const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
@@ -646,7 +646,7 @@ wss.on("connection", (twilioWS) => {
       return;
     }
 
-    // 2) After greeting, block double-questions and enforce single-question cutoff (no replay)
+    // 2) After greeting, enforce single-question cutoff ONLY after first question finishes
     if (
       (msg.type === "response.audio_transcript.delta" || msg.type === "response.output_text.delta") &&
       !greetingInFlight
@@ -656,51 +656,26 @@ wss.on("connection", (twilioWS) => {
         assistantUtterance += piece;
         const lower = assistantUtterance.toLowerCase();
 
-        // A) If it starts combining multiple fields (except date+time), stop immediately (no replay)
-        if (isDisallowedDoubleQuestion(assistantUtterance)) {
-          console.log("[Guard] multi-field question detected → cancel, no replay");
-          safeSendOpenAI({ type: "response.cancel" });
-          awaitingResponse = false;           // let VAD capture the caller next
-          assistantUtterance = "";            // reset guard buffer
-          sawQuestionStart = false;
-          singleQuestionCutApplied = true;
-          return;
-        }
-
-        // B) Early catch: once a question has started, if we see a connector that typically
-        // begins a second question (“, and…”, “, also…”, “, what…”, etc.), stop immediately.
+        // Mark when a question begins (for the "no-?" fallback)
         const questionStartRegex = /\b(what|when|which|could you|can you|can i|may i|would you|do you|what's|what is|please|share|tell me|get your|could i)\b/;
         if (!sawQuestionStart && questionStartRegex.test(lower)) {
           sawQuestionStart = true;
         }
-        const looksLikeSecondStart =
-          sawQuestionStart &&
-          /(?:,?\s+and\s+|,?\s+(?:also|as well)\s+|,?\s+(?:what|when|which|can you|could you|may i|would you)\b)/.test(lower);
 
-        if (looksLikeSecondStart) {
-          console.log("[Guard] early second-question connector → cancel, no replay");
-          safeSendOpenAI({ type: "response.cancel" });
-          awaitingResponse = false;
-          assistantUtterance = "";
-          sawQuestionStart = false;
-          singleQuestionCutApplied = true;
-          return;
-        }
-
-        // C) Clean cutoff at the first question mark — stop right after the first question
+        // Clean cutoff right after the first question mark — avoids a second question
         if (lower.includes("?")) {
           console.log("[Guard] first question ended (‘?’) → stop this turn");
           singleQuestionCutApplied = true;
           safeSendOpenAI({ type: "response.cancel" });
-          awaitingResponse = false;
+          awaitingResponse = false;     // VAD will capture the caller next
           assistantUtterance = "";
           sawQuestionStart = false;
           return;
         }
 
-        // D) If the model never uses '?', infer a cutoff after sentence end or if it runs long
-        if (sawQuestionStart && (lower.includes(". ") || lower.includes("! ") || assistantUtterance.length > 120)) {
-          console.log("[Guard] inferred end of first question → cancel, no replay");
+        // If no '?' is used, infer a cutoff after a sentence end or if it's running long
+        if (sawQuestionStart && (lower.includes(". ") || lower.includes("! ") || assistantUtterance.length > 140)) {
+          console.log("[Guard] inferred end of first question → stop this turn");
           safeSendOpenAI({ type: "response.cancel" });
           awaitingResponse = false;
           assistantUtterance = "";
@@ -740,189 +715,4 @@ wss.on("connection", (twilioWS) => {
       return;
     }
 
-    function isBookingArgs(args) { return !!(args && args.customer_name && args.service && args.start_iso && args.phone); }
-    function isListArgs(args) { return !!(args && (args.day || args.date_iso)); }
-
-    async function finishToolCall(callId) {
-      const entry = openaiWS._toolCalls[callId];
-      if (!callId || !entry) return;
-
-      const args = parseToolArgs(entry.argsText || "{}");
-      const rawName = (entry.name || "").toLowerCase();
-      const effectiveName =
-        rawName || (isBookingArgs(args) ? "book_appointment" : isListArgs(args) ? "list_appointments" : "");
-
-      console.log("[TOOL NAME]", effectiveName || "(missing)", "args=", args);
-
-      if (effectiveName === "book_appointment") {
-        const PHONE_RE = /(?:\+?\d[\d\s().-]{6,}\d)/;
-        if (!args?.phone || !PHONE_RE.test(String(args.phone))) {
-          if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
-          awaitingResponse = true;
-          safeSendOpenAI({
-            type: "response.create",
-            response: {
-              modalities: ["audio", "text"],
-              conversation: "auto",
-              instructions:
-                "Warm and brief: ask only one question — “What’s the best phone number to reach you?” Then wait silently."
-            }
-          });
-          return;
-        }
-      }
-
-      let result = { ok: false, error: "Unknown tool" };
-      if (effectiveName === "book_appointment") {
-        result = await handleBookAppointment(args);
-      } else if (effectiveName === "list_appointments") {
-        result = await handleListAppointments(args);
-      } else {
-        console.log("[TOOL ROUTING] Unknown tool name:", rawName, "args=", args);
-      }
-
-      safeSendOpenAI({
-        type: "conversation.item.create",
-        item: { type: "function_call_output", call_id: callId, output: JSON.stringify(result) },
-      });
-
-      if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
-      safeSendOpenAI({
-        type: "response.create",
-        response: {
-          modalities: ["audio", "text"],
-          conversation: "auto",
-          instructions:
-            effectiveName === "book_appointment"
-              ? "Confirm the booking in one short sentence. If it failed, briefly explain and offer the next two options."
-              : "Summarize that day’s schedule in one short, friendly sentence. If none or error, say so briefly.",
-        },
-      });
-
-      delete openaiWS._toolCalls[callId];
-    }
-
-    if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
-      const { id: itemId, name, arguments: chunk } = msg.item;
-      console.log("[TOOL START]", name, "call_id=", itemId);
-      const entry = ensureEntry(itemId, name);
-      if (entry && typeof chunk === "string") entry.argsText += chunk;
-      return;
-    }
-    if (msg.type === "response.tool_call.created") {
-      const { id, name, arguments: chunk } = msg.tool_call || {};
-      const entry = ensureEntry(id, name);
-      if (entry && typeof chunk === "string") entry.argsText += chunk;
-      return;
-    }
-    if (msg.type === "response.function_call_arguments.delta") {
-      const { call_id, item_id, name, delta } = msg;
-      if (call_id && item_id) { openaiWS._toolIdAlias[item_id] = call_id; openaiWS._toolIdAlias[call_id] = item_id; }
-      let hit = getEntryByAnyId({ call_id, item_id, id: msg.id });
-      if (!hit && item_id) hit = { key: item_id, entry: ensureEntry(item_id, name) };
-      if (!hit && call_id) hit = { key: call_id, entry: ensureEntry(call_id, name) };
-      if (hit?.entry && typeof delta === "string") hit.entry.argsText += delta;
-      return;
-    }
-    if (msg.type === "response.tool_call.delta") {
-      const { id, name, arguments: chunk } = msg.tool_call || {};
-      const entry = ensureEntry(id, name);
-      if (entry && typeof chunk === "string") entry.argsText += chunk;
-      return;
-    }
-    if (msg.type === "response.function_call_arguments.done") {
-      const { call_id, item_id, name } = msg;
-      if (call_id && item_id) { openaiWS._toolIdAlias[item_id] = call_id; openaiWS._toolIdAlias[call_id] = item_id; }
-      let hit = getEntryByAnyId({ call_id, item_id, id: msg.id });
-      if (!hit && item_id) hit = { key: item_id, entry: ensureEntry(item_id, name) };
-      if (!hit && call_id) hit = { key: call_id, entry: ensureEntry(call_id, name) };
-      const effectiveId = call_id || item_id || hit?.key;
-      console.log("[TOOL ARGS DONE] call_id=", effectiveId, "args=", hit?.entry?.argsText);
-      await finishToolCall(effectiveId);
-      return;
-    }
-    if (msg.type === "response.tool_call.completed") {
-      const id = msg.tool_call?.id || msg.call_id;
-      await finishToolCall(id);
-      return;
-    }
-  });
-
-  // ---------- Twilio inbound ----------
-  twilioWS.on("message", (raw) => {
-    let msg;
-    try {
-      msg = JSON.parse(raw.toString());
-    } catch (e) {
-      console.error("Twilio message parse error", e);
-      return;
-    }
-
-    if (msg.event === "start") {
-      streamSid = msg.start.streamSid;
-      twilioReady = true;
-      console.log("[Twilio] stream started", streamSid, "tracks:", msg.start.tracks);
-
-      resetUserCapture();
-
-      // Greeting (AI speaks)
-      greetingInFlight = true;
-      safeSendOpenAI({
-        type: "response.create",
-        response: {
-          modalities: ["audio", "text"],
-          conversation: "auto",
-          instructions:
-            "Say exactly: 'Thank you for calling Mobile Pet Grooming, How can I help you today?'"
-        },
-      });
-      awaitingResponse = true;
-      return;
-    }
-
-    if (msg.event === "media") {
-      const b64 = msg.media?.payload;
-      if (!b64) return;
-      appendUserAudio(b64);
-      return;
-    }
-
-    if (msg.event === "mark") return;
-
-    if (msg.event === "stop") {
-      console.log("[Twilio] stop");
-      safeClose(openaiWS);
-      safeClose(twilioWS);
-      return;
-    }
-  });
-
-  function sendMulawToTwilio(b64) {
-    if (!twilioReady || !streamSid) return;
-    const raw = Buffer.from(b64, "base64");
-    const FRAME = 160; // 20ms @ 8kHz μ-law
-
-    for (let i = 0; i < raw.length; i += FRAME) {
-      const slice = raw.subarray(i, Math.min(i + FRAME, raw.length));
-      safeSendTwilio({
-        event: "media",
-        streamSid,
-        media: { payload: slice.toString("base64") }
-      });
-    }
-  }
-
-  // ---------- Closures & errors ----------
-  twilioWS.on("close", () => { console.log("[Twilio] closed"); safeClose(openaiWS); });
-  openaiWS.on("close", () => { console.log("[OpenAI] closed"); safeClose(twilioWS); });
-  twilioWS.on("error", (e) => console.error("[Twilio WS error]", e));
-  openaiWS.on("error", (e) => console.error("[OpenAI WS error]", e));
-});
-
-server.listen(PORT, () => {
-  console.log(`Minimal WS server ready at http://0.0.0.0:${PORT}`);
-});
-
-function safeClose(ws) {
-  try { if (ws && ws.readyState === WebSocket.OPEN) ws.close(); } catch {}
-}
+   
