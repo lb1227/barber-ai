@@ -301,8 +301,10 @@ wss.on("connection", (twilioWS) => {
   let greetTranscript = "";
   let postGreetingUntilTs = 0;
 
-  // NEW: capture assistant’s words (post-greeting) to catch double-questions
-  let assistantUtterance = "";
+  // === NEW: guard for double questions and hard “single-question cutoff”
+  let assistantUtterance = "";         // live transcript during assistant speech
+  let sawQuestionStart = false;        // detected the start of a question
+  let singleQuestionCutApplied = false;// already cut this turn after the first question
 
   function resetUserCapture() {
     userSpeechActive = false;
@@ -316,7 +318,7 @@ wss.on("connection", (twilioWS) => {
     levelCount = 0;
   }
 
-  // === NEW: Double-question detector (allow only “date and time”) ===
+  // === Double-question detector (allow only “date and time”) ===
   function isDisallowedDoubleQuestion(text) {
     const s = (text || "").toLowerCase();
 
@@ -334,10 +336,9 @@ wss.on("connection", (twilioWS) => {
     if (hasAny(dateTokens))    cats.add("date");
     if (hasAny(timeTokens))    cats.add("time");
 
-    // Only allowed multi-field combo is exactly date + time
+    // Only allowed pair is exactly date + time
     if (cats.size === 2 && cats.has("date") && cats.has("time")) return false;
 
-    // Any other multi-field combo is disallowed (e.g., name+service, service+date, phone+date+time, etc.)
     return cats.size >= 2;
   }
 
@@ -422,6 +423,11 @@ wss.on("connection", (twilioWS) => {
         safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
       }
       safeSendOpenAI({ type: "input_audio_buffer.commit" });
+
+      // reset per-turn guards
+      assistantUtterance = "";
+      sawQuestionStart = false;
+      singleQuestionCutApplied = false;
 
       awaitingResponse = true;
       console.log(`[TURN] committing: ${capturedFrames.length} frames, ${collectedBytes} bytes`);
@@ -531,7 +537,7 @@ wss.on("connection", (twilioWS) => {
       type: "session.update",
       session: {
         modalities: ["text", "audio"],
-        voice: "verse", // keep your chosen consistent female voice
+        voice: "verse", // consistent female voice
         output_audio_format: "g711_ulaw",
         input_audio_format: "g711_ulaw",
 
@@ -604,6 +610,7 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       // reset any partial line we were analyzing
       assistantUtterance = "";
+      sawQuestionStart = false;
       return;
     }
 
@@ -638,7 +645,7 @@ wss.on("connection", (twilioWS) => {
       return;
     }
 
-    // 2) After greeting, block double-questions in real time
+    // 2) After greeting, block double-questions and enforce single-question cutoff in real time
     if (
       (msg.type === "response.audio_transcript.delta" || msg.type === "response.output_text.delta") &&
       !greetingInFlight
@@ -646,10 +653,42 @@ wss.on("connection", (twilioWS) => {
       const piece = msg.delta || msg.text || msg.output_text || "";
       if (piece) {
         assistantUtterance += piece;
+
+        // A) If it tries to combine multiple fields in *one* utterance (except date+time), cancel & re-ask single.
         if (isDisallowedDoubleQuestion(assistantUtterance)) {
-          console.log("[Guard] double question detected → cancel & re-ask single");
+          console.log("[Guard] multi-field question detected → cancel & re-ask single");
           assistantUtterance = "";
           reAskSingleQuestion();
+          return;
+        }
+
+        // B) Hard cutoff: once the *first* question is spoken, stop any follow-up in the same turn.
+        const lower = assistantUtterance.toLowerCase();
+        const questionStartRegex = /\b(what|when|which|could you|can you|can i|may i|would you|do you|what's|what is|please|share|tell me|may we|get your|could i)\b/;
+        if (!sawQuestionStart && questionStartRegex.test(lower)) {
+          sawQuestionStart = true;
+        }
+
+        const hasQuestionMark = lower.includes("?");
+        const hasSentenceEnd = lower.includes(". ") || lower.includes("! ");
+
+        if (!singleQuestionCutApplied) {
+          // Prefer to cut right after the question mark
+          if (hasQuestionMark) {
+            console.log("[Guard] first question ended (‘?’) → cancel to prevent a second");
+            singleQuestionCutApplied = true;
+            safeSendOpenAI({ type: "response.cancel" });
+            awaitingResponse = false; // let VAD capture caller next
+            return;
+          }
+          // If no '?' is used, cut after first sentence or after reasonable length
+          if (sawQuestionStart && (hasSentenceEnd || assistantUtterance.length > 140)) {
+            console.log("[Guard] first question inferred (no '?') → cancel to prevent a second");
+            singleQuestionCutApplied = true;
+            safeSendOpenAI({ type: "response.cancel" });
+            awaitingResponse = false;
+            return;
+          }
         }
       }
       return;
@@ -664,12 +703,24 @@ wss.on("connection", (twilioWS) => {
         postGreetingUntilTs = Date.now() + POST_GREETING_COOLDOWN_MS;
         greetTranscript = "";
       }
+
+      // reset guards at end of assistant turn
       assistantUtterance = "";
+      sawQuestionStart = false;
+      singleQuestionCutApplied = false;
 
       if (!userSpeechActive) safeSendOpenAI({ type: "input_audio_buffer.clear" });
       return;
     }
-    if (msg.type === "error") { console.error("[OpenAI ERROR]", msg); isAssistantSpeaking = false; awaitingResponse = false; assistantUtterance = ""; return; }
+    if (msg.type === "error") {
+      console.error("[OpenAI ERROR]", msg);
+      isAssistantSpeaking = false;
+      awaitingResponse = false;
+      assistantUtterance = "";
+      sawQuestionStart = false;
+      singleQuestionCutApplied = false;
+      return;
+    }
 
     function isBookingArgs(args) { return !!(args && args.customer_name && args.service && args.start_iso && args.phone); }
     function isListArgs(args) { return !!(args && (args.day || args.date_iso)); }
