@@ -230,6 +230,7 @@ const INSTRUCTIONS =
     "- Never combine other fields in one sentence (e.g., **no** “name and phone”, **no** “service and date”).",
     "- Collect in this order: **name → service → phone → date & time**.",
     "- After each answer, acknowledge briefly and ask the next single question.",
+    "- End your turn immediately after asking the question. Do not add a second clause.",
   ].join("\n");
 
 // ---------- Main bridge ----------
@@ -301,7 +302,7 @@ wss.on("connection", (twilioWS) => {
   let greetTranscript = "";
   let postGreetingUntilTs = 0;
 
-  // === NEW: guard for double questions and hard “single-question cutoff”
+  // Guards for “one question per turn”
   let assistantUtterance = "";         // live transcript during assistant speech
   let sawQuestionStart = false;        // detected the start of a question
   let singleQuestionCutApplied = false;// already cut this turn after the first question
@@ -645,7 +646,7 @@ wss.on("connection", (twilioWS) => {
       return;
     }
 
-    // 2) After greeting, block double-questions and enforce single-question cutoff in real time
+    // 2) After greeting, block double-questions and enforce single-question cutoff (no replay)
     if (
       (msg.type === "response.audio_transcript.delta" || msg.type === "response.output_text.delta") &&
       !greetingInFlight
@@ -653,42 +654,59 @@ wss.on("connection", (twilioWS) => {
       const piece = msg.delta || msg.text || msg.output_text || "";
       if (piece) {
         assistantUtterance += piece;
+        const lower = assistantUtterance.toLowerCase();
 
-        // A) If it tries to combine multiple fields in *one* utterance (except date+time), cancel & re-ask single.
+        // A) If it starts combining multiple fields (except date+time), stop immediately (no replay)
         if (isDisallowedDoubleQuestion(assistantUtterance)) {
-          console.log("[Guard] multi-field question detected → cancel & re-ask single");
-          assistantUtterance = "";
-          reAskSingleQuestion();
+          console.log("[Guard] multi-field question detected → cancel, no replay");
+          safeSendOpenAI({ type: "response.cancel" });
+          awaitingResponse = false;           // let VAD capture the caller next
+          assistantUtterance = "";            // reset guard buffer
+          sawQuestionStart = false;
+          singleQuestionCutApplied = true;
           return;
         }
 
-        // B) Hard cutoff: once the *first* question is spoken, stop any follow-up in the same turn.
-        const lower = assistantUtterance.toLowerCase();
-        const questionStartRegex = /\b(what|when|which|could you|can you|can i|may i|would you|do you|what's|what is|please|share|tell me|may we|get your|could i)\b/;
+        // B) Early catch: once a question has started, if we see a connector that typically
+        // begins a second question (“, and…”, “, also…”, “, what…”, etc.), stop immediately.
+        const questionStartRegex = /\b(what|when|which|could you|can you|can i|may i|would you|do you|what's|what is|please|share|tell me|get your|could i)\b/;
         if (!sawQuestionStart && questionStartRegex.test(lower)) {
           sawQuestionStart = true;
         }
+        const looksLikeSecondStart =
+          sawQuestionStart &&
+          /(?:,?\s+and\s+|,?\s+(?:also|as well)\s+|,?\s+(?:what|when|which|can you|could you|may i|would you)\b)/.test(lower);
 
-        const hasQuestionMark = lower.includes("?");
-        const hasSentenceEnd = lower.includes(". ") || lower.includes("! ");
+        if (looksLikeSecondStart) {
+          console.log("[Guard] early second-question connector → cancel, no replay");
+          safeSendOpenAI({ type: "response.cancel" });
+          awaitingResponse = false;
+          assistantUtterance = "";
+          sawQuestionStart = false;
+          singleQuestionCutApplied = true;
+          return;
+        }
 
-        if (!singleQuestionCutApplied) {
-          // Prefer to cut right after the question mark
-          if (hasQuestionMark) {
-            console.log("[Guard] first question ended (‘?’) → cancel to prevent a second");
-            singleQuestionCutApplied = true;
-            safeSendOpenAI({ type: "response.cancel" });
-            awaitingResponse = false; // let VAD capture caller next
-            return;
-          }
-          // If no '?' is used, cut after first sentence or after reasonable length
-          if (sawQuestionStart && (hasSentenceEnd || assistantUtterance.length > 140)) {
-            console.log("[Guard] first question inferred (no '?') → cancel to prevent a second");
-            singleQuestionCutApplied = true;
-            safeSendOpenAI({ type: "response.cancel" });
-            awaitingResponse = false;
-            return;
-          }
+        // C) Clean cutoff at the first question mark — stop right after the first question
+        if (lower.includes("?")) {
+          console.log("[Guard] first question ended (‘?’) → stop this turn");
+          singleQuestionCutApplied = true;
+          safeSendOpenAI({ type: "response.cancel" });
+          awaitingResponse = false;
+          assistantUtterance = "";
+          sawQuestionStart = false;
+          return;
+        }
+
+        // D) If the model never uses '?', infer a cutoff after sentence end or if it runs long
+        if (sawQuestionStart && (lower.includes(". ") || lower.includes("! ") || assistantUtterance.length > 120)) {
+          console.log("[Guard] inferred end of first question → cancel, no replay");
+          safeSendOpenAI({ type: "response.cancel" });
+          awaitingResponse = false;
+          assistantUtterance = "";
+          sawQuestionStart = false;
+          singleQuestionCutApplied = true;
+          return;
         }
       }
       return;
