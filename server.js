@@ -59,12 +59,15 @@ const server = http.createServer(async (req, res) => {
       // Reverted: stream only; we start recording via REST when the media stream starts
       const twiml = `
         <Response>
+          <Start>
+            <Record recordingTrack="both"/>
+          </Start>
           <Connect>
             <Stream url="${BASE_URL.replace(/^https?/, "wss")}/media" track="inbound_track"/>
           </Connect>
         </Response>
       `.trim();
-
+      
       res.writeHead(200, { "Content-Type": "text/xml" });
       return res.end(twiml);
     }
