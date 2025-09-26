@@ -17,12 +17,16 @@ function parseToolArgs(maybeJSON) {
  * - PORT (default 10000)
  * - BASE_URL (e.g. https://barber-ai.onrender.com)
  * - OPENAI_REALTIME_MODEL (default gpt-4o-realtime-preview)
+ * - TWILIO_ACCOUNT_SID (for REST start recording)
+ * - TWILIO_AUTH_TOKEN  (for REST start recording)
  */
 const PORT = process.env.PORT || 10000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REALTIME_MODEL =
   process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview";
 const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN;
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY env var");
@@ -52,11 +56,9 @@ const server = http.createServer(async (req, res) => {
 
     // === Twilio voice ===
     if (path === "/voice") {
+      // Reverted: stream only; we start recording via REST when the media stream starts
       const twiml = `
         <Response>
-          <Start>
-            <Record recordingTrack="both"/>
-          </Start>
           <Connect>
             <Stream url="${BASE_URL.replace(/^https?/, "wss")}/media" track="inbound_track"/>
           </Connect>
@@ -236,6 +238,41 @@ const INSTRUCTIONS =
     "- After each answer, acknowledge briefly and ask the next single question.",
     "- End your turn immediately after asking the question, and **always end with a question mark**.",
   ].join("\n");
+
+// ---------- Start Twilio recording via REST (dual channels, both tracks) ----------
+async function startTwilioRecording(callSid) {
+  try {
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !callSid) {
+      console.warn("[Recording] Missing creds or callSid");
+      return;
+    }
+    const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+    const body = new URLSearchParams({
+      RecordingChannels: "dual",
+      RecordingTrack: "both"
+    });
+    const resp = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}/Recordings.json`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${auth}`,
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body
+      }
+    );
+    if (!resp.ok) {
+      const txt = await resp.text();
+      console.error("[Recording] start failed", resp.status, txt);
+    } else {
+      const json = await resp.json();
+      console.log("[Recording] started, sid=", json.sid);
+    }
+  } catch (e) {
+    console.error("[Recording] error", e);
+  }
+}
 
 // ---------- Main bridge ----------
 wss.on("connection", (twilioWS) => {
@@ -866,10 +903,14 @@ wss.on("connection", (twilioWS) => {
       twilioReady = true;
       console.log("[Twilio] stream started", streamSid, "tracks:", msg.start.tracks);
 
+      // NEW: start Twilio recording via REST (dual channels, both tracks)
+      const callSid = msg.start?.callSid;
+      startTwilioRecording(callSid).catch(console.error);
+
       resetUserCapture();
 
       // Greeting (AI speaks)
-      let greetingInFlight = true; // local flag to this scope was earlier global; behavior unchanged
+      let greetingInFlight = true; // keep as in your current code
       safeSendOpenAI({
         type: "response.create",
         response: {
