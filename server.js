@@ -17,16 +17,12 @@ function parseToolArgs(maybeJSON) {
  * - PORT (default 10000)
  * - BASE_URL (e.g. https://barber-ai.onrender.com)
  * - OPENAI_REALTIME_MODEL (default gpt-4o-realtime-preview)
- * - TWILIO_ACCOUNT_SID (for REST start recording)
- * - TWILIO_AUTH_TOKEN  (for REST start recording)
  */
 const PORT = process.env.PORT || 10000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REALTIME_MODEL =
   process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview";
 const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
-const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
-const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN;
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY env var");
@@ -56,7 +52,7 @@ const server = http.createServer(async (req, res) => {
 
     // === Twilio voice ===
     if (path === "/voice") {
-      // Stream only; recording is started via REST when the media stream starts
+      // Stream-only TwiML (no call recording)
       const twiml = `
         <Response>
           <Connect>
@@ -125,9 +121,9 @@ const server = http.createServer(async (req, res) => {
       console.log("[HTTP] /gcal/create",
         "summary=", summary, "start=", start, "end=", end, "attendees=", attendees.join(",")
       );
-      
+
       const event = await createEvent({ summary, start, end, attendees });
-      
+
       console.log("[HTTP] /gcal/create OK id=", event.id);
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify(event, null, 2));
@@ -238,41 +234,6 @@ const INSTRUCTIONS =
     "- After each answer, acknowledge briefly and ask the next single question.",
     "- End your turn immediately after asking the question, and **always end with a question mark**.",
   ].join("\n");
-
-// ---------- Start Twilio recording via REST (dual channels, both tracks) ----------
-async function startTwilioRecording(callSid) {
-  try {
-    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !callSid) {
-      console.warn("[Recording] Missing creds or callSid");
-      return;
-    }
-    const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
-    const body = new URLSearchParams({
-      RecordingChannels: "dual",
-      RecordingTrack: "both"
-    });
-    const resp = await fetch(
-      `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}/Recordings.json`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Basic ${auth}`,
-          "Content-Type": "application/x-www-form-urlencoded"
-        },
-        body
-      }
-    );
-    if (!resp.ok) {
-      const txt = await resp.text();
-      console.error("[Recording] start failed", resp.status, txt);
-    } else {
-      const json = await resp.json();
-      console.log("[Recording] started, sid=", json.sid);
-    }
-  } catch (e) {
-    console.error("[Recording] error", e);
-  }
-}
 
 // ---------- Main bridge ----------
 wss.on("connection", (twilioWS) => {
@@ -460,7 +421,7 @@ wss.on("connection", (twilioWS) => {
         resetUserCapture();
         return;
       }
-      
+
       for (const f of capturedFrames) {
         safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
       }
@@ -493,12 +454,12 @@ wss.on("connection", (twilioWS) => {
   async function handleListAppointments(args) {
     const { day, date_iso } = args || {};
     let target = date_iso ? new Date(date_iso) : new Date();
-  
+
     if (!date_iso && day === "tomorrow") {
       target.setDate(target.getDate() + 1);
     }
     // today/default handled implicitly
-  
+
     try {
       const items = await listEventsOn(target.toISOString());
       return {
@@ -698,7 +659,8 @@ wss.on("connection", (twilioWS) => {
       if (piece) {
         assistantUtterance += piece;
 
-        // FAST 'and' bridge detector
+        // FAST 'and' bridge detector — if the model starts joining two asks with "and",
+        // cut even sooner (tiny defer to avoid clipping).
         if (!questionCutTimer) {
           const snap = assistantUtterance.toLowerCase();
           if (snap.includes(" and ") && isDisallowedDoubleQuestion(snap)) {
@@ -714,7 +676,8 @@ wss.on("connection", (twilioWS) => {
           }
         }
 
-        // EARLY STOP: disallowed double-question
+        // EARLY STOP: detect disallowed double-question (except date+time pair).
+        // Defer ~120ms so audio doesn't clip.
         if (!questionCutTimer && isDisallowedDoubleQuestion(assistantUtterance)) {
           questionCutTimer = setTimeout(() => {
             console.log("[Guard] disallowed double question → stop this turn (deferred)");
@@ -727,7 +690,7 @@ wss.on("connection", (twilioWS) => {
           }, 120);
         }
 
-        // NORMAL STOP: stop shortly after first '?'
+        // NORMAL STOP: also stop ~400ms AFTER the first '?'
         if (assistantUtterance.includes("?") && !questionCutTimer) {
           questionCutTimer = setTimeout(() => {
             console.log("[Guard] first question ended (‘?’) → stop this turn (deferred)");
@@ -747,6 +710,7 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
 
+      // clear any pending deferred cancel
       if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
 
       if (greetingInFlight) {
@@ -755,6 +719,7 @@ wss.on("connection", (twilioWS) => {
         greetTranscript = "";
       }
 
+      // reset guards at end of assistant turn
       assistantUtterance = "";
       sawQuestionStart = false;
       singleQuestionCutApplied = false;
@@ -767,6 +732,7 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
 
+      // clear any pending deferred cancel
       if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
 
       assistantUtterance = "";
@@ -897,10 +863,6 @@ wss.on("connection", (twilioWS) => {
       streamSid = msg.start.streamSid;
       twilioReady = true;
       console.log("[Twilio] stream started", streamSid, "tracks:", msg.start.tracks);
-
-      // NEW: start Twilio recording via REST (dual channels, both tracks)
-      const callSid = msg.start?.callSid;
-      startTwilioRecording(callSid).catch(console.error);
 
       resetUserCapture();
 
