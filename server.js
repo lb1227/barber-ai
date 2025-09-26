@@ -17,12 +17,16 @@ function parseToolArgs(maybeJSON) {
  * - PORT (default 10000)
  * - BASE_URL (e.g. https://barber-ai.onrender.com)
  * - OPENAI_REALTIME_MODEL (default gpt-4o-realtime-preview)
+ * - TWILIO_ACCOUNT_SID (for REST start recording)
+ * - TWILIO_AUTH_TOKEN  (for REST start recording)
  */
 const PORT = process.env.PORT || 10000;
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const OPENAI_REALTIME_MODEL =
   process.env.OPENAI_REALTIME_MODEL || "gpt-4o-realtime-preview";
 const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
+const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN;
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY env var");
@@ -52,15 +56,18 @@ const server = http.createServer(async (req, res) => {
 
     // === Twilio voice ===
     if (path === "/voice") {
-      // Stream-only TwiML (no call recording)
+      // Reverted: stream only; we start recording via REST when the media stream starts
       const twiml = `
         <Response>
+          <Start>
+            <Record recordingTrack="both"/>
+          </Start>
           <Connect>
             <Stream url="${BASE_URL.replace(/^https?/, "wss")}/media" track="inbound_track"/>
           </Connect>
         </Response>
       `.trim();
-
+      
       res.writeHead(200, { "Content-Type": "text/xml" });
       return res.end(twiml);
     }
@@ -121,9 +128,9 @@ const server = http.createServer(async (req, res) => {
       console.log("[HTTP] /gcal/create",
         "summary=", summary, "start=", start, "end=", end, "attendees=", attendees.join(",")
       );
-
+      
       const event = await createEvent({ summary, start, end, attendees });
-
+      
       console.log("[HTTP] /gcal/create OK id=", event.id);
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify(event, null, 2));
@@ -178,7 +185,6 @@ function rmsOfMuLawBase64(b64) {
     const len = buf.length;
     if (!len) return 0;
     let sumSq = 0;
-    // Sample μ-law bytes sparsely if very large to save CPU
     const stride = len > 3200 ? Math.floor(len / 1600) : 1;
     let count = 0;
     for (let i = 0; i < len; i += stride) {
@@ -187,7 +193,6 @@ function rmsOfMuLawBase64(b64) {
       count++;
     }
     const meanSq = sumSq / Math.max(1, count);
-    // Normalize to ~0..1 from int16
     return Math.sqrt(meanSq) / 32768;
   } catch {
     return 0;
@@ -199,16 +204,32 @@ const VAD = {
   FRAME_MS: 20,          // Twilio sends ~20ms frames
   RMS_START: 0.055,
   RMS_CONTINUE: 0.040,
-  MIN_SPEECH_MS: 260,    // was 320 (slightly quicker)
-  END_SILENCE_MS: 900,   // was 1200 (commit sooner)
-  BARGE_IN_MIN_MS: 220,  // require ~0.22s of speech to cancel assistant
+  MIN_SPEECH_MS: 260,    // (pre-VAD-tweak baseline)
+  END_SILENCE_MS: 900,
+  BARGE_IN_MIN_MS: 220,
   MAX_TURN_DURATION_MS: 6000,
 };
-const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
+const MIN_AVG_RMS = 0.030; // baseline
 
 // === NEW: enforce exact greeting + brief pause before listening ===
 const EXPECTED_GREETING = "thank you for calling mobile pet grooming, how can i help you today?";
-const POST_GREETING_COOLDOWN_MS = 700; // ~0.7s pause after greeting
+const POST_GREETING_COOLDOWN_MS = 700; // baseline pause after greeting
+
+// === Flow script the assistant must follow verbatim ===
+const FLOW_SCRIPT = [
+  "FLOW: When caller asks to book:",
+  "1) Ask: \"Awesome I can go ahead and help you with that, can I start by getting your name for the booking?\"",
+  "2) After name: Ask: \"Alright <name>, what kind of service were you looking to book today? A full grooming or just a bath?\"",
+  "3) After service: Ask: \"Perfect, will we be grooming a dog or a cat today?\"",
+  "4) After species: Ask: \"Sounds good, and do you know the approximate weight of your dog/cat?\"",
+  "5) After weight: Ask: \"Got it! And what date and time works best for you?\"",
+  "6) After date/time: Call list_appointments for that date. If the requested time is free, say:",
+  "   \"Okay, there is availability <date> at <time>. In order to get you booked, can I get your phone number and address?\"",
+  "   If not free, offer two nearest alternatives and ask which works.",
+  "7) After phone and address (together): Call book_appointment. Put species, weight, and address in the notes.",
+  "8) After booking: Say: \"Alright <name>, I have you booked for <time> <date>. Is there anything else I can help you with?\"",
+  "Rules: One question per turn EXCEPT steps 5 (date + time) and 7 (phone + address).",
+].join('\n');
 
 // === Identity, task & style ===
 const INSTRUCTIONS =
@@ -226,14 +247,57 @@ const INSTRUCTIONS =
     "",
     "# Single-question policy (STRICT)",
     "- Ask for **exactly one** piece of information per turn.",
-    "- The **only allowed pair** is: **“What day and time work best for your appointment?”**",
-    "- Never combine other fields in one sentence (e.g., **no** “name and phone”, **no** “service and date”).",
-    "- Never join requests with “and”; ask one thing only.",
+    "- Allowed pairs: **date + time** (step 5) and **phone + address** (step 7).",
+    "- Never combine other fields in one sentence.",
     "- If you start a second request, **stop** and wait for the caller.",
-    "- Collect in this order: **name → service → phone → date & time**.",
-    "- After each answer, acknowledge briefly and ask the next single question.",
-    "- End your turn immediately after asking the question, and **always end with a question mark**.",
+    "",
+    "# Required collection order",
+    "- name → service → species (dog/cat) → weight → date & time → phone + address.",
+    "- After each answer, acknowledge briefly and ask the next item.",
+    "- End your turn immediately after the question, and **end with a question mark**.",
+    "",
+    "# Booking tools",
+    "- After date & time, call `list_appointments` for that day to check availability.",
+    "- When booking, call `book_appointment`. Put species, weight, and address in the `notes`.",
+    "",
+    "# Follow this exact flow & wording",
+    FLOW_SCRIPT
   ].join("\n");
+
+// ---------- Start Twilio recording via REST (dual channels, both tracks) ----------
+async function startTwilioRecording(callSid) {
+  try {
+    if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN || !callSid) {
+      console.warn("[Recording] Missing creds or callSid");
+      return;
+    }
+    const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString("base64");
+    const body = new URLSearchParams({
+      RecordingChannels: "dual",
+      RecordingTrack: "both"
+    });
+    const resp = await fetch(
+      `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Calls/${callSid}/Recordings.json`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${auth}`,
+          "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body
+      }
+    );
+    if (!resp.ok) {
+      const txt = await resp.text();
+      console.error("[Recording] start failed", resp.status, txt);
+    } else {
+      const json = await resp.json();
+      console.log("[Recording] started, sid=", json.sid);
+    }
+  } catch (e) {
+    console.error("[Recording] error", e);
+  }
+}
 
 // ---------- Main bridge ----------
 wss.on("connection", (twilioWS) => {
@@ -323,25 +387,31 @@ wss.on("connection", (twilioWS) => {
     levelCount = 0;
   }
 
-  // === Double-question detector (allow only “date and time”) — helper ===
+  // === Double-question detector (allow only “date and time” and “phone + address”) — helper ===
   function isDisallowedDoubleQuestion(text) {
     const s = (text || "").toLowerCase();
 
-    const nameTokens    = ["name", "first name", "last name"];
-    const serviceTokens = ["service", "groom", "grooming", "bath", "nail", "trim"];
-    const phoneTokens   = ["phone", "phone number", "callback", "contact number"];
-    const dateTokens    = ["date", "day", "today", "tomorrow", "monday","tuesday","wednesday","thursday","friday","saturday","sunday"];
-    const timeTokens    = ["time", "am", "pm", "morning", "afternoon", "evening"];
+    const nameTokens     = ["name", "first name", "last name"];
+    const serviceTokens  = ["service", "groom", "grooming", "bath", "nail", "trim"];
+    const phoneTokens    = ["phone", "phone number", "callback", "contact number"];
+    const addressTokens  = ["address", "street", "zip", "zipcode", "post code", "postcode"];
+    const dateTokens     = ["date", "day", "today", "tomorrow", "monday","tuesday","wednesday","thursday","friday","saturday","sunday"];
+    const timeTokens     = ["time", "am", "pm", "morning", "afternoon", "evening"];
 
     const hasAny = (tokens) => tokens.some(t => s.includes(t));
-    const cats = new Set();
-    if (hasAny(nameTokens))    cats.add("name");
-    if (hasAny(serviceTokens)) cats.add("service");
-    if (hasAny(phoneTokens))   cats.add("phone");
-    if (hasAny(dateTokens))    cats.add("date");
-    if (hasAny(timeTokens))    cats.add("time");
 
+    const cats = new Set();
+    if (hasAny(nameTokens))     cats.add("name");
+    if (hasAny(serviceTokens))  cats.add("service");
+    if (hasAny(phoneTokens))    cats.add("phone");
+    if (hasAny(addressTokens))  cats.add("address");
+    if (hasAny(dateTokens))     cats.add("date");
+    if (hasAny(timeTokens))     cats.add("time");
+
+    // Allowed pairs:
     if (cats.size === 2 && cats.has("date") && cats.has("time")) return false;
+    if (cats.size === 2 && cats.has("phone") && cats.has("address")) return false;
+
     return cats.size >= 2;
   }
 
@@ -354,8 +424,9 @@ wss.on("connection", (twilioWS) => {
         modalities: ["audio", "text"],
         conversation: "auto",
         instructions:
-          "Ask **only one** concise question for the next missing field (order: name → service → phone → date & time). " +
-          "Do not combine fields. The only allowed pair is: “What day and time work best for your appointment?”",
+          "Follow the FLOW_SCRIPT strictly. Ask **only the next** question in the required order " +
+          "(name → service → species → weight → date & time → phone + address). " +
+          "Use the exact wording in FLOW_SCRIPT. Then wait silently.\n\nFLOW_SCRIPT:\n" + FLOW_SCRIPT,
       },
     });
   }
@@ -421,7 +492,7 @@ wss.on("connection", (twilioWS) => {
         resetUserCapture();
         return;
       }
-
+      
       for (const f of capturedFrames) {
         safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
       }
@@ -440,11 +511,10 @@ wss.on("connection", (twilioWS) => {
           modalities: ["audio", "text"],
           conversation: "auto",
           instructions:
-            "Stay warm and brief. Ask **only one** concise question next. " +
-            "If the caller provided name, service, start time, and phone, call `book_appointment`. " +
-            "If they ask about availability, call `list_appointments`. " +
-            "For rescheduling/canceling, confirm name and the date/time to change, then proceed. " +
-            "Only discuss mobile pet grooming topics.",
+            "Follow the FLOW_SCRIPT strictly. Stay warm and brief. Ask **only one** concise question next. " +
+            "If the caller provided the needed info to book, call `book_appointment`. " +
+            "To check availability, call `list_appointments` for the requested day. " +
+            "Only discuss mobile pet grooming topics.\n\nFLOW_SCRIPT:\n" + FLOW_SCRIPT,
         },
       });
       resetUserCapture();
@@ -454,12 +524,12 @@ wss.on("connection", (twilioWS) => {
   async function handleListAppointments(args) {
     const { day, date_iso } = args || {};
     let target = date_iso ? new Date(date_iso) : new Date();
-
+  
     if (!date_iso && day === "tomorrow") {
       target.setDate(target.getDate() + 1);
     }
     // today/default handled implicitly
-
+  
     try {
       const items = await listEventsOn(target.toISOString());
       return {
@@ -611,9 +681,7 @@ wss.on("connection", (twilioWS) => {
     }
     if (msg.type === "response.audio.done") {
       isAssistantSpeaking = false;
-      // clear any pending deferred cancel
       if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
-      // reset any partial line we were analyzing
       assistantUtterance = "";
       sawQuestionStart = false;
       return;
@@ -659,8 +727,7 @@ wss.on("connection", (twilioWS) => {
       if (piece) {
         assistantUtterance += piece;
 
-        // FAST 'and' bridge detector — if the model starts joining two asks with "and",
-        // cut even sooner (tiny defer to avoid clipping).
+        // FAST 'and' bridge detector
         if (!questionCutTimer) {
           const snap = assistantUtterance.toLowerCase();
           if (snap.includes(" and ") && isDisallowedDoubleQuestion(snap)) {
@@ -672,12 +739,14 @@ wss.on("connection", (twilioWS) => {
               sawQuestionStart = false;
               singleQuestionCutApplied = true;
               questionCutTimer = null;
+
+              // Immediately re-ask the single clean question following the flow
+              reAskSingleQuestion();
             }, 120);
           }
         }
 
-        // EARLY STOP: detect disallowed double-question (except date+time pair).
-        // Defer ~120ms so audio doesn't clip.
+        // EARLY STOP: disallowed double-question (except allowed pairs)
         if (!questionCutTimer && isDisallowedDoubleQuestion(assistantUtterance)) {
           questionCutTimer = setTimeout(() => {
             console.log("[Guard] disallowed double question → stop this turn (deferred)");
@@ -687,10 +756,13 @@ wss.on("connection", (twilioWS) => {
             sawQuestionStart = false;
             singleQuestionCutApplied = true;
             questionCutTimer = null;
+
+            // Immediately re-ask the single clean question following the flow
+            reAskSingleQuestion();
           }, 120);
         }
 
-        // NORMAL STOP: also stop ~400ms AFTER the first '?'
+        // NORMAL STOP: ~400ms after first '?'
         if (assistantUtterance.includes("?") && !questionCutTimer) {
           questionCutTimer = setTimeout(() => {
             console.log("[Guard] first question ended (‘?’) → stop this turn (deferred)");
@@ -710,7 +782,6 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
 
-      // clear any pending deferred cancel
       if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
 
       if (greetingInFlight) {
@@ -719,7 +790,6 @@ wss.on("connection", (twilioWS) => {
         greetTranscript = "";
       }
 
-      // reset guards at end of assistant turn
       assistantUtterance = "";
       sawQuestionStart = false;
       singleQuestionCutApplied = false;
@@ -732,7 +802,6 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
 
-      // clear any pending deferred cancel
       if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
 
       assistantUtterance = "";
@@ -794,9 +863,8 @@ wss.on("connection", (twilioWS) => {
           modalities: ["audio", "text"],
           conversation: "auto",
           instructions:
-            effectiveName === "book_appointment"
-              ? "Confirm the booking in one short sentence. If it failed, briefly explain and offer the next two options."
-              : "Summarize that day’s schedule in one short, friendly sentence. If none or error, say so briefly.",
+            "Follow the FLOW_SCRIPT strictly. Confirm or summarize in one short sentence, then continue the flow. " +
+            "If booking failed or slot unavailable, briefly explain and offer two nearby times.\n\nFLOW_SCRIPT:\n" + FLOW_SCRIPT,
         },
       });
 
@@ -863,6 +931,10 @@ wss.on("connection", (twilioWS) => {
       streamSid = msg.start.streamSid;
       twilioReady = true;
       console.log("[Twilio] stream started", streamSid, "tracks:", msg.start.tracks);
+
+      // NEW: start Twilio recording via REST (dual channels, both tracks)
+      const callSid = msg.start?.callSid;
+      startTwilioRecording(callSid).catch(console.error);
 
       resetUserCapture();
 
