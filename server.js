@@ -228,6 +228,7 @@ const INSTRUCTIONS =
     "- The **only allowed pair** is: **“What day and time work best for your appointment?”**",
     "- Never combine other fields in one sentence (e.g., **no** “name and phone”, **no** “service and date”).",
     "- Never join requests with “and”; ask one thing only.",
+    "- If you start a second request, **stop** and wait for the caller.",
     "- Collect in this order: **name → service → phone → date & time**.",
     "- After each answer, acknowledge briefly and ask the next single question.",
     "- End your turn immediately after asking the question, and **always end with a question mark**.",
@@ -306,7 +307,7 @@ wss.on("connection", (twilioWS) => {
   let assistantUtterance = "";         // live transcript during assistant speech
   let sawQuestionStart = false;        // (kept for compatibility; not used by simplified guard)
   let singleQuestionCutApplied = false;// (kept for compatibility)
-  // NEW: defer-cancel timer to avoid clipping the question audio
+  // Defer-cancel timer to avoid clipping the question audio
   let questionCutTimer = null;
 
   function resetUserCapture() {
@@ -609,7 +610,7 @@ wss.on("connection", (twilioWS) => {
     }
     if (msg.type === "response.audio.done") {
       isAssistantSpeaking = false;
-      // NEW: clear any pending deferred cancel
+      // clear any pending deferred cancel
       if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
       // reset any partial line we were analyzing
       assistantUtterance = "";
@@ -657,8 +658,25 @@ wss.on("connection", (twilioWS) => {
       if (piece) {
         assistantUtterance += piece;
 
+        // FAST 'and' bridge detector — if the model starts joining two asks with "and",
+        // cut even sooner (tiny defer to avoid clipping).
+        if (!questionCutTimer) {
+          const snap = assistantUtterance.toLowerCase();
+          if (snap.includes(" and ") && isDisallowedDoubleQuestion(snap)) {
+            questionCutTimer = setTimeout(() => {
+              console.log("[Guard] 'and' bridge → stop (fast)");
+              safeSendOpenAI({ type: "response.cancel" });
+              awaitingResponse = false;
+              assistantUtterance = "";
+              sawQuestionStart = false;
+              singleQuestionCutApplied = true;
+              questionCutTimer = null;
+            }, 120);
+          }
+        }
+
         // EARLY STOP: detect disallowed double-question (except date+time pair).
-        // Defer ~300ms so audio doesn't clip.
+        // Defer ~120ms so audio doesn't clip.
         if (!questionCutTimer && isDisallowedDoubleQuestion(assistantUtterance)) {
           questionCutTimer = setTimeout(() => {
             console.log("[Guard] disallowed double question → stop this turn (deferred)");
@@ -668,7 +686,7 @@ wss.on("connection", (twilioWS) => {
             sawQuestionStart = false;
             singleQuestionCutApplied = true;
             questionCutTimer = null;
-          }, 300);
+          }, 120);
         }
 
         // NORMAL STOP: also stop ~400ms AFTER the first '?'
@@ -691,7 +709,7 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
 
-      // NEW: clear any pending deferred cancel
+      // clear any pending deferred cancel
       if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
 
       if (greetingInFlight) {
@@ -713,7 +731,7 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
 
-      // NEW: clear any pending deferred cancel
+      // clear any pending deferred cancel
       if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
 
       assistantUtterance = "";
