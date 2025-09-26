@@ -201,19 +201,21 @@ function rmsOfMuLawBase64(b64) {
 
 // ---------- Conversation policies (tunable) ----------
 const VAD = {
-  FRAME_MS: 20,          // Twilio sends ~20ms frames
-  RMS_START: 0.055,
+  FRAME_MS: 20,                 // Twilio sends ~20ms frames
+  RMS_START: 0.065,             // CHANGED: was 0.055 (harder to trigger on noise)
   RMS_CONTINUE: 0.040,
-  MIN_SPEECH_MS: 260,    // (pre-VAD-tweak baseline)
+  MIN_SPEECH_MS: 360,           // CHANGED: was 260 (require longer continuous speech)
   END_SILENCE_MS: 900,
   BARGE_IN_MIN_MS: 220,
   MAX_TURN_DURATION_MS: 6000,
 };
-const MIN_AVG_RMS = 0.030; // baseline
+const MIN_AVG_RMS = 0.030;
 
 // === NEW: enforce exact greeting + brief pause before listening ===
 const EXPECTED_GREETING = "thank you for calling mobile pet grooming, how can i help you today?";
-const POST_GREETING_COOLDOWN_MS = 700; // baseline pause after greeting
+const POST_GREETING_COOLDOWN_MS = 700;
+// === NEW: short cooldown after ANY assistant turn to ignore micro-noise
+const POST_ASK_COOLDOWN_MS = 500; // NEW
 
 // === Flow script the assistant must follow verbatim ===
 const FLOW_SCRIPT = [
@@ -368,11 +370,13 @@ wss.on("connection", (twilioWS) => {
   let greetTranscript = "";
   let postGreetingUntilTs = 0;
 
+  // NEW: cooldown after ANY assistant turn
+  let postAskUntilTs = 0; // NEW
+
   // Guards for one-question-per-turn
-  let assistantUtterance = "";         // live transcript during assistant speech
-  let sawQuestionStart = false;        // (kept for compatibility; not used by simplified guard)
-  let singleQuestionCutApplied = false;// (kept for compatibility)
-  // Defer-cancel timer to avoid clipping the question audio
+  let assistantUtterance = "";
+  let sawQuestionStart = false;
+  let singleQuestionCutApplied = false;
   let questionCutTimer = null;
 
   function resetUserCapture() {
@@ -387,7 +391,7 @@ wss.on("connection", (twilioWS) => {
     levelCount = 0;
   }
 
-  // === Double-question detector (allow only “date and time” and “phone + address”) — helper ===
+  // === Double-question detector (allow only “date+time” and “phone+address”) ===
   function isDisallowedDoubleQuestion(text) {
     const s = (text || "").toLowerCase();
 
@@ -415,25 +419,9 @@ wss.on("connection", (twilioWS) => {
     return cats.size >= 2;
   }
 
-  function reAskSingleQuestion() {
-    if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
-    awaitingResponse = true;
-    safeSendOpenAI({
-      type: "response.create",
-      response: {
-        modalities: ["audio", "text"],
-        conversation: "auto",
-        instructions:
-          "Follow the FLOW_SCRIPT strictly. Ask **only the next** question in the required order " +
-          "(name → service → species → weight → date & time → phone + address). " +
-          "Use the exact wording in FLOW_SCRIPT. Then wait silently.\n\nFLOW_SCRIPT:\n" + FLOW_SCRIPT,
-      },
-    });
-  }
-
   function appendUserAudio(b64) {
-    // Do NOT listen while greeting is speaking or during short cooldown after it
-    if (greetingInFlight || Date.now() < postGreetingUntilTs) return;
+    // Do NOT listen while greeting is speaking or during cooldowns
+    if (greetingInFlight || Date.now() < postGreetingUntilTs || Date.now() < postAskUntilTs) return; // CHANGED
 
     const level = rmsOfMuLawBase64(b64);
 
@@ -727,7 +715,7 @@ wss.on("connection", (twilioWS) => {
       if (piece) {
         assistantUtterance += piece;
 
-        // FAST 'and' bridge detector
+        // FAST 'and' bridge detector — cancel but DO NOT re-ask immediately
         if (!questionCutTimer) {
           const snap = assistantUtterance.toLowerCase();
           if (snap.includes(" and ") && isDisallowedDoubleQuestion(snap)) {
@@ -739,14 +727,12 @@ wss.on("connection", (twilioWS) => {
               sawQuestionStart = false;
               singleQuestionCutApplied = true;
               questionCutTimer = null;
-
-              // Immediately re-ask the single clean question following the flow
-              reAskSingleQuestion();
+              // NOTE: no immediate re-ask (wait for user)
             }, 120);
           }
         }
 
-        // EARLY STOP: disallowed double-question (except allowed pairs)
+        // EARLY STOP: disallowed double-question (except allowed pairs) — cancel, no re-ask
         if (!questionCutTimer && isDisallowedDoubleQuestion(assistantUtterance)) {
           questionCutTimer = setTimeout(() => {
             console.log("[Guard] disallowed double question → stop this turn (deferred)");
@@ -756,9 +742,7 @@ wss.on("connection", (twilioWS) => {
             sawQuestionStart = false;
             singleQuestionCutApplied = true;
             questionCutTimer = null;
-
-            // Immediately re-ask the single clean question following the flow
-            reAskSingleQuestion();
+            // NOTE: no immediate re-ask (wait for user)
           }, 120);
         }
 
@@ -789,6 +773,9 @@ wss.on("connection", (twilioWS) => {
         postGreetingUntilTs = Date.now() + POST_GREETING_COOLDOWN_MS;
         greetTranscript = "";
       }
+
+      // NEW: short “post-ask” cooldown after any assistant turn
+      postAskUntilTs = Date.now() + POST_ASK_COOLDOWN_MS; // NEW
 
       assistantUtterance = "";
       sawQuestionStart = false;
