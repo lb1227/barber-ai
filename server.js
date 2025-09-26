@@ -185,6 +185,7 @@ function rmsOfMuLawBase64(b64) {
     const len = buf.length;
     if (!len) return 0;
     let sumSq = 0;
+    // Sample μ-law bytes sparsely if very large to save CPU
     const stride = len > 3200 ? Math.floor(len / 1600) : 1;
     let count = 0;
     for (let i = 0; i < len; i += stride) {
@@ -193,6 +194,7 @@ function rmsOfMuLawBase64(b64) {
       count++;
     }
     const meanSq = sumSq / Math.max(1, count);
+    // Normalize to ~0..1 from int16
     return Math.sqrt(meanSq) / 32768;
   } catch {
     return 0;
@@ -201,21 +203,23 @@ function rmsOfMuLawBase64(b64) {
 
 // ---------- Conversation policies (tunable) ----------
 const VAD = {
-  FRAME_MS: 20,                 // Twilio sends ~20ms frames
-  RMS_START: 0.065,             // CHANGED: was 0.055 (harder to trigger on noise)
+  FRAME_MS: 20,          // Twilio sends ~20ms frames
+  RMS_START: 0.065,
   RMS_CONTINUE: 0.040,
-  MIN_SPEECH_MS: 360,           // CHANGED: was 260 (require longer continuous speech)
+  MIN_SPEECH_MS: 360,    // require longer continuous speech
   END_SILENCE_MS: 900,
-  BARGE_IN_MIN_MS: 220,
+  BARGE_IN_MIN_MS: 320,  // CHANGED: was 220
   MAX_TURN_DURATION_MS: 6000,
 };
-const MIN_AVG_RMS = 0.030;
+const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
 
 // === NEW: enforce exact greeting + brief pause before listening ===
 const EXPECTED_GREETING = "thank you for calling mobile pet grooming, how can i help you today?";
-const POST_GREETING_COOLDOWN_MS = 700;
-// === NEW: short cooldown after ANY assistant turn to ignore micro-noise
-const POST_ASK_COOLDOWN_MS = 500; // NEW
+const POST_GREETING_COOLDOWN_MS = 700; // ~0.7s pause after greeting
+
+// === NEW: barge-block window & higher threshold while bot is speaking ===
+const BARGE_BLOCK_MS = 1000;     // ignore all inbound audio for 1s after each bot reply starts
+const RMS_BARGE_START = 0.085;   // higher RMS threshold for barge-in while bot is talking
 
 // === Flow script the assistant must follow verbatim ===
 const FLOW_SCRIPT = [
@@ -370,14 +374,14 @@ wss.on("connection", (twilioWS) => {
   let greetTranscript = "";
   let postGreetingUntilTs = 0;
 
-  // NEW: cooldown after ANY assistant turn
-  let postAskUntilTs = 0; // NEW
+  // === NEW: barge-block timestamp ===
+  let bargeBlockUntilTs = 0;
 
   // Guards for one-question-per-turn
-  let assistantUtterance = "";
-  let sawQuestionStart = false;
-  let singleQuestionCutApplied = false;
-  let questionCutTimer = null;
+  let assistantUtterance = "";         // live transcript during assistant speech
+  let sawQuestionStart = false;        // (kept for compatibility)
+  let singleQuestionCutApplied = false;// (kept for compatibility)
+  let questionCutTimer = null;         // deferred cancel to avoid clipping
 
   function resetUserCapture() {
     userSpeechActive = false;
@@ -420,15 +424,21 @@ wss.on("connection", (twilioWS) => {
   }
 
   function appendUserAudio(b64) {
-    // Do NOT listen while greeting is speaking or during cooldowns
-    if (greetingInFlight || Date.now() < postGreetingUntilTs || Date.now() < postAskUntilTs) return; // CHANGED
+    // Do NOT listen while greeting is speaking or during brief post-greeting cooldown
+    if (greetingInFlight || Date.now() < postGreetingUntilTs) return;
 
     const level = rmsOfMuLawBase64(b64);
 
+    // While assistant is speaking / a response is in-flight, allow barge-in only
     if (isAssistantSpeaking || awaitingResponse) {
-      if (level >= VAD.RMS_START) {
+      // NEW: block all barge-in during the initial protected window
+      if (Date.now() < bargeBlockUntilTs) return;
+
+      // Use a higher threshold while bot is speaking
+      if (level >= RMS_BARGE_START) {
         bargeMs += VAD.FRAME_MS;
         if (bargeMs >= VAD.BARGE_IN_MIN_MS) {
+          // Cancel current speech and start fresh capture on next frames
           if (isAssistantSpeaking || awaitingResponse) {
             safeSendOpenAI({ type: "response.cancel" });
           }
@@ -442,6 +452,7 @@ wss.on("connection", (twilioWS) => {
       return;
     }
 
+    // --- Normal VAD capture path ---
     if (!userSpeechActive) {
       if (level >= VAD.RMS_START) {
         userSpeechActive = true;
@@ -505,6 +516,9 @@ wss.on("connection", (twilioWS) => {
             "Only discuss mobile pet grooming topics.\n\nFLOW_SCRIPT:\n" + FLOW_SCRIPT,
         },
       });
+      // NEW: start barge-block window for this bot turn
+      bargeBlockUntilTs = Date.now() + BARGE_BLOCK_MS;
+
       resetUserCapture();
     }
   }
@@ -699,6 +713,9 @@ wss.on("connection", (twilioWS) => {
                 "Say exactly: 'Thank you for calling Mobile Pet Grooming, How can I help you today?'"
             },
           });
+          // NEW: start barge-block window for re-issued greeting
+          bargeBlockUntilTs = Date.now() + BARGE_BLOCK_MS;
+
           greetTranscript = "";
           awaitingResponse = true;
         }
@@ -720,14 +737,13 @@ wss.on("connection", (twilioWS) => {
           const snap = assistantUtterance.toLowerCase();
           if (snap.includes(" and ") && isDisallowedDoubleQuestion(snap)) {
             questionCutTimer = setTimeout(() => {
-              console.log("[Guard] 'and' bridge → stop (fast)");
               safeSendOpenAI({ type: "response.cancel" });
               awaitingResponse = false;
               assistantUtterance = "";
               sawQuestionStart = false;
               singleQuestionCutApplied = true;
               questionCutTimer = null;
-              // NOTE: no immediate re-ask (wait for user)
+              // no immediate re-ask
             }, 120);
           }
         }
@@ -735,21 +751,19 @@ wss.on("connection", (twilioWS) => {
         // EARLY STOP: disallowed double-question (except allowed pairs) — cancel, no re-ask
         if (!questionCutTimer && isDisallowedDoubleQuestion(assistantUtterance)) {
           questionCutTimer = setTimeout(() => {
-            console.log("[Guard] disallowed double question → stop this turn (deferred)");
             safeSendOpenAI({ type: "response.cancel" });
             awaitingResponse = false;
             assistantUtterance = "";
             sawQuestionStart = false;
             singleQuestionCutApplied = true;
             questionCutTimer = null;
-            // NOTE: no immediate re-ask (wait for user)
+            // no immediate re-ask
           }, 120);
         }
 
         // NORMAL STOP: ~400ms after first '?'
         if (assistantUtterance.includes("?") && !questionCutTimer) {
           questionCutTimer = setTimeout(() => {
-            console.log("[Guard] first question ended (‘?’) → stop this turn (deferred)");
             safeSendOpenAI({ type: "response.cancel" });
             awaitingResponse = false;
             assistantUtterance = "";
@@ -774,9 +788,7 @@ wss.on("connection", (twilioWS) => {
         greetTranscript = "";
       }
 
-      // NEW: short “post-ask” cooldown after any assistant turn
-      postAskUntilTs = Date.now() + POST_ASK_COOLDOWN_MS; // NEW
-
+      // reset guards at end of assistant turn
       assistantUtterance = "";
       sawQuestionStart = false;
       singleQuestionCutApplied = false;
@@ -825,6 +837,9 @@ wss.on("connection", (twilioWS) => {
                 "Warm and brief: ask only one question — “What’s the best phone number to reach you?” Then wait silently."
             }
           });
+          // NEW: start barge-block window for this phone prompt
+          bargeBlockUntilTs = Date.now() + BARGE_BLOCK_MS;
+
           return;
         }
       }
@@ -854,6 +869,8 @@ wss.on("connection", (twilioWS) => {
             "If booking failed or slot unavailable, briefly explain and offer two nearby times.\n\nFLOW_SCRIPT:\n" + FLOW_SCRIPT,
         },
       });
+      // NEW: start barge-block window for this follow-up
+      bargeBlockUntilTs = Date.now() + BARGE_BLOCK_MS;
 
       delete openaiWS._toolCalls[callId];
     }
@@ -936,6 +953,9 @@ wss.on("connection", (twilioWS) => {
             "Say exactly: 'Thank you for calling Mobile Pet Grooming, How can I help you today?'"
         },
       });
+      // NEW: start barge-block window for the greeting
+      bargeBlockUntilTs = Date.now() + BARGE_BLOCK_MS;
+
       awaitingResponse = true;
       return;
     }
