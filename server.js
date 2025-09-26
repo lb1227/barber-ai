@@ -200,7 +200,7 @@ const VAD = {
   RMS_CONTINUE: 0.040,
   MIN_SPEECH_MS: 260,    // was 320 (slightly quicker)
   END_SILENCE_MS: 900,   // was 1200 (commit sooner)
-  BARGE_IN_MIN_MS: 120,  // was 150 (caller can interrupt a bit faster)
+  BARGE_IN_MIN_MS: 220,  // was 150 (caller can interrupt a bit faster)
   MAX_TURN_DURATION_MS: 6000,
 };
 const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
