@@ -227,6 +227,7 @@ const INSTRUCTIONS =
     "- Ask for **exactly one** piece of information per turn.",
     "- The **only allowed pair** is: **“What day and time work best for your appointment?”**",
     "- Never combine other fields in one sentence (e.g., **no** “name and phone”, **no** “service and date”).",
+    "- Never join requests with “and”; ask one thing only.",
     "- Collect in this order: **name → service → phone → date & time**.",
     "- After each answer, acknowledge briefly and ask the next single question.",
     "- End your turn immediately after asking the question, and **always end with a question mark**.",
@@ -320,7 +321,7 @@ wss.on("connection", (twilioWS) => {
     levelCount = 0;
   }
 
-  // === Double-question detector (allow only “date and time”) — kept, but no longer used in guard ===
+  // === Double-question detector (allow only “date and time”) — helper ===
   function isDisallowedDoubleQuestion(text) {
     const s = (text || "").toLowerCase();
 
@@ -647,7 +648,7 @@ wss.on("connection", (twilioWS) => {
       return;
     }
 
-    // 2) After greeting, enforce single-question cutoff (defer cancel ~400ms after first '?')
+    // 2) After greeting, enforce single-question cutoff with early double-question detector
     if (
       (msg.type === "response.audio_transcript.delta" || msg.type === "response.output_text.delta") &&
       !greetingInFlight
@@ -656,18 +657,31 @@ wss.on("connection", (twilioWS) => {
       if (piece) {
         assistantUtterance += piece;
 
-        // IMPORTANT: don't cancel mid-sentence.
-        // Schedule a cancel ~400ms AFTER the first '?' so the audio can finish naturally.
+        // EARLY STOP: detect disallowed double-question (except date+time pair).
+        // Defer ~300ms so audio doesn't clip.
+        if (!questionCutTimer && isDisallowedDoubleQuestion(assistantUtterance)) {
+          questionCutTimer = setTimeout(() => {
+            console.log("[Guard] disallowed double question → stop this turn (deferred)");
+            safeSendOpenAI({ type: "response.cancel" });
+            awaitingResponse = false;
+            assistantUtterance = "";
+            sawQuestionStart = false;
+            singleQuestionCutApplied = true;
+            questionCutTimer = null;
+          }, 300);
+        }
+
+        // NORMAL STOP: also stop ~400ms AFTER the first '?'
         if (assistantUtterance.includes("?") && !questionCutTimer) {
           questionCutTimer = setTimeout(() => {
             console.log("[Guard] first question ended (‘?’) → stop this turn (deferred)");
             safeSendOpenAI({ type: "response.cancel" });
-            awaitingResponse = false;      // let VAD capture the caller next
-            assistantUtterance = "";       // reset guard buffer
+            awaitingResponse = false;
+            assistantUtterance = "";
             sawQuestionStart = false;
             singleQuestionCutApplied = true;
             questionCutTimer = null;
-          }, 400); // defer just enough to let the TTS finish the question
+          }, 400);
         }
       }
       return;
