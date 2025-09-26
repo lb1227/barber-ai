@@ -221,11 +221,15 @@ const POST_GREETING_COOLDOWN_MS = 700; // ~0.7s pause after greeting
 const BARGE_BLOCK_MS = 1000;     // ignore all inbound audio for 1s after each bot reply starts
 const RMS_BARGE_START = 0.085;   // higher RMS threshold for barge-in while bot is talking
 
+// === NEW: how long to wait after the first '?' before cancelling (let it finish the sentence)
+const QUESTION_END_DEFER_MS = 900;
+
 // === Flow script the assistant must follow verbatim ===
 const FLOW_SCRIPT = [
   "FLOW: When caller asks to book:",
   "1) Ask: \"Awesome I can go ahead and help you with that, can I start by getting your name for the booking?\"",
-  "2) After name: Ask: \"Alright <name>, what kind of service were you looking to book today? A full grooming or just a bath?\"",
+  // CHANGED: one question, options folded before the single '?'
+  "2) After name: Ask: \"Alright <name>, full grooming or just a bath — what kind of service would you like to book today?\"",
   "3) After service: Ask: \"Perfect, will we be grooming a dog or a cat today?\"",
   "4) After species: Ask: \"Sounds good, and do you know the approximate weight of your dog/cat?\"",
   "5) After weight: Ask: \"Got it! And what date and time works best for you?\"",
@@ -761,7 +765,7 @@ wss.on("connection", (twilioWS) => {
           }, 120);
         }
 
-        // NORMAL STOP: ~400ms after first '?'
+        // NORMAL STOP: defer after the FIRST '?', give time to finish the sentence
         if (assistantUtterance.includes("?") && !questionCutTimer) {
           questionCutTimer = setTimeout(() => {
             safeSendOpenAI({ type: "response.cancel" });
@@ -770,7 +774,7 @@ wss.on("connection", (twilioWS) => {
             sawQuestionStart = false;
             singleQuestionCutApplied = true;
             questionCutTimer = null;
-          }, 400);
+          }, QUESTION_END_DEFER_MS); // CHANGED from 400 to 900 via constant
         }
       }
       return;
