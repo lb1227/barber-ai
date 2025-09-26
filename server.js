@@ -56,18 +56,15 @@ const server = http.createServer(async (req, res) => {
 
     // === Twilio voice ===
     if (path === "/voice") {
-      // Reverted: stream only; we start recording via REST when the media stream starts
+      // Stream only; recording is started via REST when the media stream starts
       const twiml = `
         <Response>
-          <Start>
-            <Record recordingTrack="both"/>
-          </Start>
           <Connect>
             <Stream url="${BASE_URL.replace(/^https?/, "wss")}/media" track="inbound_track"/>
           </Connect>
         </Response>
       `.trim();
-      
+
       res.writeHead(200, { "Content-Type": "text/xml" });
       return res.end(twiml);
     }
@@ -701,8 +698,7 @@ wss.on("connection", (twilioWS) => {
       if (piece) {
         assistantUtterance += piece;
 
-        // FAST 'and' bridge detector — if the model starts joining two asks with "and",
-        // cut even sooner (tiny defer to avoid clipping).
+        // FAST 'and' bridge detector
         if (!questionCutTimer) {
           const snap = assistantUtterance.toLowerCase();
           if (snap.includes(" and ") && isDisallowedDoubleQuestion(snap)) {
@@ -718,8 +714,7 @@ wss.on("connection", (twilioWS) => {
           }
         }
 
-        // EARLY STOP: detect disallowed double-question (except date+time pair).
-        // Defer ~120ms so audio doesn't clip.
+        // EARLY STOP: disallowed double-question
         if (!questionCutTimer && isDisallowedDoubleQuestion(assistantUtterance)) {
           questionCutTimer = setTimeout(() => {
             console.log("[Guard] disallowed double question → stop this turn (deferred)");
@@ -732,7 +727,7 @@ wss.on("connection", (twilioWS) => {
           }, 120);
         }
 
-        // NORMAL STOP: also stop ~400ms AFTER the first '?'
+        // NORMAL STOP: stop shortly after first '?'
         if (assistantUtterance.includes("?") && !questionCutTimer) {
           questionCutTimer = setTimeout(() => {
             console.log("[Guard] first question ended (‘?’) → stop this turn (deferred)");
@@ -752,7 +747,6 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
 
-      // clear any pending deferred cancel
       if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
 
       if (greetingInFlight) {
@@ -761,7 +755,6 @@ wss.on("connection", (twilioWS) => {
         greetTranscript = "";
       }
 
-      // reset guards at end of assistant turn
       assistantUtterance = "";
       sawQuestionStart = false;
       singleQuestionCutApplied = false;
@@ -774,7 +767,6 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
 
-      // clear any pending deferred cancel
       if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
 
       assistantUtterance = "";
