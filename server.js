@@ -910,7 +910,7 @@ wss.on("connection", (twilioWS) => {
       resetUserCapture();
 
       // Greeting (AI speaks)
-      let greetingInFlight = true; // keep as in your current code
+      greetingInFlight = true; // use the global so guards stay off during greeting
       safeSendOpenAI({
         type: "response.create",
         response: {
