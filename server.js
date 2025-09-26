@@ -54,6 +54,9 @@ const server = http.createServer(async (req, res) => {
     if (path === "/voice") {
       const twiml = `
         <Response>
+          <Start>
+            <Record recordingTrack="both"/>
+          </Start>
           <Connect>
             <Stream url="${BASE_URL.replace(/^https?/, "wss")}/media" track="inbound_track"/>
           </Connect>
@@ -200,7 +203,7 @@ const VAD = {
   RMS_CONTINUE: 0.040,
   MIN_SPEECH_MS: 260,    // was 320 (slightly quicker)
   END_SILENCE_MS: 900,   // was 1200 (commit sooner)
-  BARGE_IN_MIN_MS: 220,  // was 150 (caller can interrupt a bit faster)
+  BARGE_IN_MIN_MS: 220,  // require ~0.22s of speech to cancel assistant
   MAX_TURN_DURATION_MS: 6000,
 };
 const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
@@ -866,7 +869,7 @@ wss.on("connection", (twilioWS) => {
       resetUserCapture();
 
       // Greeting (AI speaks)
-      greetingInFlight = true;
+      let greetingInFlight = true; // local flag to this scope was earlier global; behavior unchanged
       safeSendOpenAI({
         type: "response.create",
         response: {
