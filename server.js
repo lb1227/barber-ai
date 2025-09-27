@@ -202,44 +202,27 @@ function rmsOfMuLawBase64(b64) {
 }
 
 // ---------- Conversation policies (tunable) ----------
+// TIGHTER VAD (dynamic) — replaces your previous VAD block
 const VAD = {
   FRAME_MS: 20,          // Twilio sends ~20ms frames
-  RMS_START: 0.065,
-  RMS_CONTINUE: 0.040,
-  MIN_SPEECH_MS: 360,    // require longer continuous speech
+  RMS_START: 0.09,       // was 0.055/0.065 — stricter
+  RMS_CONTINUE: 0.065,   // was 0.040 — stricter
+  MIN_SPEECH_MS: 500,    // was 260/360 — need ~0.5s sustained speech
   END_SILENCE_MS: 900,
-  BARGE_IN_MIN_MS: 320,  // CHANGED: was 220
+  BARGE_IN_MIN_MS: 350,  // slightly harder to barge
   MAX_TURN_DURATION_MS: 6000,
 };
 const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
 
+// Dynamic noise floor & stability
+const NOISE_CALIBRATION_MS = 1500;      // measure background for first ~1.5s
+const MIN_CONSEC_FRAMES_START = 5;      // ~100ms over threshold to start a turn
+const MIN_CONSEC_FRAMES_CONTINUE = 3;   // stability while continuing
+const POST_BOT_TURN_COOLDOWN_MS = 350;  // small “echo guard” after bot ends
+
 // === NEW: enforce exact greeting + brief pause before listening ===
 const EXPECTED_GREETING = "thank you for calling mobile pet grooming, how can i help you today?";
 const POST_GREETING_COOLDOWN_MS = 700; // ~0.7s pause after greeting
-
-// === NEW: barge-block window & higher threshold while bot is speaking ===
-const BARGE_BLOCK_MS = 1000;     // ignore all inbound audio for 1s after each bot reply starts
-const RMS_BARGE_START = 0.085;   // higher RMS threshold for barge-in while bot is talking
-
-// === NEW: how long to wait after the first '?' before cancelling (let it finish the sentence)
-const QUESTION_END_DEFER_MS = 900;
-
-// === Flow script the assistant must follow verbatim ===
-const FLOW_SCRIPT = [
-  "FLOW: When caller asks to book:",
-  "1) Ask: \"Awesome I can go ahead and help you with that, can I start by getting your name for the booking?\"",
-  // CHANGED: one question, options folded before the single '?'
-  "2) After name: Ask: \"Alright <name>, full grooming or just a bath — what kind of service would you like to book today?\"",
-  "3) After service: Ask: \"Perfect, will we be grooming a dog or a cat today?\"",
-  "4) After species: Ask: \"Sounds good, and do you know the approximate weight of your dog/cat?\"",
-  "5) After weight: Ask: \"Got it! And what date and time works best for you?\"",
-  "6) After date/time: Call list_appointments for that date. If the requested time is free, say:",
-  "   \"Okay, there is availability <date> at <time>. In order to get you booked, can I get your phone number and address?\"",
-  "   If not free, offer two nearest alternatives and ask which works.",
-  "7) After phone and address (together): Call book_appointment. Put species, weight, and address in the notes.",
-  "8) After booking: Say: \"Alright <name>, I have you booked for <time> <date>. Is there anything else I can help you with?\"",
-  "Rules: One question per turn EXCEPT steps 5 (date + time) and 7 (phone + address).",
-].join('\n');
 
 // === Identity, task & style ===
 const INSTRUCTIONS =
@@ -257,21 +240,17 @@ const INSTRUCTIONS =
     "",
     "# Single-question policy (STRICT)",
     "- Ask for **exactly one** piece of information per turn.",
-    "- Allowed pairs: **date + time** (step 5) and **phone + address** (step 7).",
-    "- Never combine other fields in one sentence.",
+    "- The **only allowed pair** is: **“What day and time work best for your appointment?”**",
+    "- Never combine other fields in one sentence (e.g., **no** “name and phone”, **no** “service and date”).",
+    "- Never join requests with “and”; ask one thing only.",
     "- If you start a second request, **stop** and wait for the caller.",
+    "- Collect in this order: **name → service → phone → date & time**.",
+    "- After each answer, acknowledge briefly and ask the next single question.",
+    "- End your turn immediately after asking the question, and **always end with a question mark**.",
     "",
-    "# Required collection order",
-    "- name → service → species (dog/cat) → weight → date & time → phone + address.",
-    "- After each answer, acknowledge briefly and ask the next item.",
-    "- End your turn immediately after the question, and **end with a question mark**.",
-    "",
-    "# Booking tools",
-    "- After date & time, call `list_appointments` for that day to check availability.",
-    "- When booking, call `book_appointment`. Put species, weight, and address in the `notes`.",
-    "",
-    "# Follow this exact flow & wording",
-    FLOW_SCRIPT
+    "# Guided call flow prompts (key lines)",
+    "1) After booking intent: Ask: \"Awesome, I can help with that. Can I start by getting your name for the booking?\"",
+    "2) After name: Ask: \"Alright <name>, what kind of service would you like to book today, full grooming or just a bath?\""
   ].join("\n");
 
 // ---------- Start Twilio recording via REST (dual channels, both tracks) ----------
@@ -378,14 +357,23 @@ wss.on("connection", (twilioWS) => {
   let greetTranscript = "";
   let postGreetingUntilTs = 0;
 
-  // === NEW: barge-block timestamp ===
-  let bargeBlockUntilTs = 0;
+  // NEW: noise calibration & stability
+  let rmsBaselineSum = 0;
+  let rmsBaselineCount = 0;
+  let calibrationUntilTs = 0;
+
+  // NEW: short cooldown after bot finishes talking
+  let postBotUntilTs = 0;
+
+  // NEW: consecutive hot/continue frames
+  let consecHot = 0;
+  let consecCont = 0;
 
   // Guards for one-question-per-turn
   let assistantUtterance = "";         // live transcript during assistant speech
-  let sawQuestionStart = false;        // (kept for compatibility)
-  let singleQuestionCutApplied = false;// (kept for compatibility)
-  let questionCutTimer = null;         // deferred cancel to avoid clipping
+  let sawQuestionStart = false;        // kept for compatibility
+  let singleQuestionCutApplied = false;// kept for compatibility
+  let questionCutTimer = null;         // defer-cancel timer to avoid clipping
 
   function resetUserCapture() {
     userSpeechActive = false;
@@ -397,52 +385,75 @@ wss.on("connection", (twilioWS) => {
     capturedFrames = [];
     sumLevel = 0;
     levelCount = 0;
+    consecHot = 0;
+    consecCont = 0;
   }
 
-  // === Double-question detector (allow only “date+time” and “phone+address”) ===
+  // === Dynamic noise helpers ===
+  function noiseBaseline() {
+    return rmsBaselineCount ? (rmsBaselineSum / rmsBaselineCount) : 0;
+  }
+  function maybeCalibrate(level) {
+    if (Date.now() < calibrationUntilTs) {
+      rmsBaselineSum += level;
+      rmsBaselineCount += 1;
+    }
+  }
+  function startThreshold() {
+    return Math.max(VAD.RMS_START, noiseBaseline() + 0.03);
+  }
+  function continueThreshold() {
+    return Math.max(VAD.RMS_CONTINUE, noiseBaseline() + 0.02);
+  }
+
+  // === Double-question detector (allow only “date and time”) — helper ===
   function isDisallowedDoubleQuestion(text) {
     const s = (text || "").toLowerCase();
 
-    const nameTokens     = ["name", "first name", "last name"];
-    const serviceTokens  = ["service", "groom", "grooming", "bath", "nail", "trim"];
-    const phoneTokens    = ["phone", "phone number", "callback", "contact number"];
-    const addressTokens  = ["address", "street", "zip", "zipcode", "post code", "postcode"];
-    const dateTokens     = ["date", "day", "today", "tomorrow", "monday","tuesday","wednesday","thursday","friday","saturday","sunday"];
-    const timeTokens     = ["time", "am", "pm", "morning", "afternoon", "evening"];
+    const nameTokens    = ["name", "first name", "last name"];
+    const serviceTokens = ["service", "groom", "grooming", "bath", "nail", "trim"];
+    const phoneTokens   = ["phone", "phone number", "callback", "contact number"];
+    const dateTokens    = ["date", "day", "today", "tomorrow", "monday","tuesday","wednesday","thursday","friday","saturday","sunday"];
+    const timeTokens    = ["time", "am", "pm", "morning", "afternoon", "evening"];
 
     const hasAny = (tokens) => tokens.some(t => s.includes(t));
-
     const cats = new Set();
-    if (hasAny(nameTokens))     cats.add("name");
-    if (hasAny(serviceTokens))  cats.add("service");
-    if (hasAny(phoneTokens))    cats.add("phone");
-    if (hasAny(addressTokens))  cats.add("address");
-    if (hasAny(dateTokens))     cats.add("date");
-    if (hasAny(timeTokens))     cats.add("time");
+    if (hasAny(nameTokens))    cats.add("name");
+    if (hasAny(serviceTokens)) cats.add("service");
+    if (hasAny(phoneTokens))   cats.add("phone");
+    if (hasAny(dateTokens))    cats.add("date");
+    if (hasAny(timeTokens))    cats.add("time");
 
-    // Allowed pairs:
     if (cats.size === 2 && cats.has("date") && cats.has("time")) return false;
-    if (cats.size === 2 && cats.has("phone") && cats.has("address")) return false;
-
     return cats.size >= 2;
   }
 
+  function reAskSingleQuestion() {
+    if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
+    awaitingResponse = true;
+    safeSendOpenAI({
+      type: "response.create",
+      response: {
+        modalities: ["audio", "text"],
+        conversation: "auto",
+        instructions:
+          "Ask **only one** concise question for the next missing field (order: name → service → phone → date & time). " +
+          "Do not combine fields. The only allowed pair is: “What day and time work best for your appointment?”",
+      },
+    });
+  }
+
   function appendUserAudio(b64) {
-    // Do NOT listen while greeting is speaking or during brief post-greeting cooldown
-    if (greetingInFlight || Date.now() < postGreetingUntilTs) return;
-
     const level = rmsOfMuLawBase64(b64);
+    maybeCalibrate(level);
 
-    // While assistant is speaking / a response is in-flight, allow barge-in only
+    // Don’t listen during greeting, right after greeting, or right after any bot turn
+    if (greetingInFlight || Date.now() < postGreetingUntilTs || Date.now() < postBotUntilTs) return;
+
     if (isAssistantSpeaking || awaitingResponse) {
-      // NEW: block all barge-in during the initial protected window
-      if (Date.now() < bargeBlockUntilTs) return;
-
-      // Use a higher threshold while bot is speaking
-      if (level >= RMS_BARGE_START) {
+      if (level >= startThreshold()) {
         bargeMs += VAD.FRAME_MS;
         if (bargeMs >= VAD.BARGE_IN_MIN_MS) {
-          // Cancel current speech and start fresh capture on next frames
           if (isAssistantSpeaking || awaitingResponse) {
             safeSendOpenAI({ type: "response.cancel" });
           }
@@ -456,20 +467,29 @@ wss.on("connection", (twilioWS) => {
       return;
     }
 
-    // --- Normal VAD capture path ---
+    const st = startThreshold();
+    const ct = continueThreshold();
+
     if (!userSpeechActive) {
-      if (level >= VAD.RMS_START) {
-        userSpeechActive = true;
-        userSpeechMs = VAD.FRAME_MS;
-        silenceMs = 0;
+      if (level >= st) {
+        consecHot += 1;
+        if (consecHot >= MIN_CONSEC_FRAMES_START) {
+          userSpeechActive = true;
+          userSpeechMs = MIN_CONSEC_FRAMES_START * VAD.FRAME_MS;
+          silenceMs = 0;
+          consecHot = 0;
+        }
       } else {
-        return;
+        consecHot = 0;
+        return; // still idle/noise
       }
     } else {
-      if (level >= VAD.RMS_CONTINUE) {
+      if (level >= ct) {
+        consecCont += 1;
         userSpeechMs += VAD.FRAME_MS;
         silenceMs = 0;
       } else {
+        consecCont = 0;
         silenceMs += VAD.FRAME_MS;
       }
     }
@@ -514,15 +534,13 @@ wss.on("connection", (twilioWS) => {
           modalities: ["audio", "text"],
           conversation: "auto",
           instructions:
-            "Follow the FLOW_SCRIPT strictly. Stay warm and brief. Ask **only one** concise question next. " +
-            "If the caller provided the needed info to book, call `book_appointment`. " +
-            "To check availability, call `list_appointments` for the requested day. " +
-            "Only discuss mobile pet grooming topics.\n\nFLOW_SCRIPT:\n" + FLOW_SCRIPT,
+            "Stay warm and brief. Ask **only one** concise question next. " +
+            "If the caller provided name, service, start time, and phone, call `book_appointment`. " +
+            "If they ask about availability, call `list_appointments`. " +
+            "For rescheduling/canceling, confirm name and the date/time to change, then proceed. " +
+            "Only discuss mobile pet grooming topics.",
         },
       });
-      // NEW: start barge-block window for this bot turn
-      bargeBlockUntilTs = Date.now() + BARGE_BLOCK_MS;
-
       resetUserCapture();
     }
   }
@@ -687,7 +705,9 @@ wss.on("connection", (twilioWS) => {
     }
     if (msg.type === "response.audio.done") {
       isAssistantSpeaking = false;
+      // clear any pending deferred cancel
       if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
+      // reset any partial line we were analyzing
       assistantUtterance = "";
       sawQuestionStart = false;
       return;
@@ -717,9 +737,6 @@ wss.on("connection", (twilioWS) => {
                 "Say exactly: 'Thank you for calling Mobile Pet Grooming, How can I help you today?'"
             },
           });
-          // NEW: start barge-block window for re-issued greeting
-          bargeBlockUntilTs = Date.now() + BARGE_BLOCK_MS;
-
           greetTranscript = "";
           awaitingResponse = true;
         }
@@ -736,45 +753,48 @@ wss.on("connection", (twilioWS) => {
       if (piece) {
         assistantUtterance += piece;
 
-        // FAST 'and' bridge detector — cancel but DO NOT re-ask immediately
+        // FAST 'and' bridge detector — if the model starts joining two asks with "and",
+        // cut even sooner (tiny defer to avoid clipping).
         if (!questionCutTimer) {
           const snap = assistantUtterance.toLowerCase();
           if (snap.includes(" and ") && isDisallowedDoubleQuestion(snap)) {
             questionCutTimer = setTimeout(() => {
+              console.log("[Guard] 'and' bridge → stop (fast)");
               safeSendOpenAI({ type: "response.cancel" });
               awaitingResponse = false;
               assistantUtterance = "";
               sawQuestionStart = false;
               singleQuestionCutApplied = true;
               questionCutTimer = null;
-              // no immediate re-ask
             }, 120);
           }
         }
 
-        // EARLY STOP: disallowed double-question (except allowed pairs) — cancel, no re-ask
+        // EARLY STOP: detect disallowed double-question (except date+time pair).
+        // Defer ~120ms so audio doesn't clip.
         if (!questionCutTimer && isDisallowedDoubleQuestion(assistantUtterance)) {
           questionCutTimer = setTimeout(() => {
+            console.log("[Guard] disallowed double question → stop this turn (deferred)");
             safeSendOpenAI({ type: "response.cancel" });
             awaitingResponse = false;
             assistantUtterance = "";
             sawQuestionStart = false;
             singleQuestionCutApplied = true;
             questionCutTimer = null;
-            // no immediate re-ask
           }, 120);
         }
 
-        // NORMAL STOP: defer after the FIRST '?', give time to finish the sentence
+        // NORMAL STOP: also stop ~400ms AFTER the first '?'
         if (assistantUtterance.includes("?") && !questionCutTimer) {
           questionCutTimer = setTimeout(() => {
+            console.log("[Guard] first question ended (‘?’) → stop this turn (deferred)");
             safeSendOpenAI({ type: "response.cancel" });
             awaitingResponse = false;
             assistantUtterance = "";
             sawQuestionStart = false;
             singleQuestionCutApplied = true;
             questionCutTimer = null;
-          }, QUESTION_END_DEFER_MS); // CHANGED from 400 to 900 via constant
+          }, 400);
         }
       }
       return;
@@ -784,6 +804,7 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
 
+      // clear any pending deferred cancel
       if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
 
       if (greetingInFlight) {
@@ -791,6 +812,9 @@ wss.on("connection", (twilioWS) => {
         postGreetingUntilTs = Date.now() + POST_GREETING_COOLDOWN_MS;
         greetTranscript = "";
       }
+
+      // NEW: add a small cooldown after ANY bot turn to avoid echo / self-trigger
+      postBotUntilTs = Date.now() + POST_BOT_TURN_COOLDOWN_MS;
 
       // reset guards at end of assistant turn
       assistantUtterance = "";
@@ -805,6 +829,7 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
 
+      // clear any pending deferred cancel
       if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
 
       assistantUtterance = "";
@@ -841,9 +866,6 @@ wss.on("connection", (twilioWS) => {
                 "Warm and brief: ask only one question — “What’s the best phone number to reach you?” Then wait silently."
             }
           });
-          // NEW: start barge-block window for this phone prompt
-          bargeBlockUntilTs = Date.now() + BARGE_BLOCK_MS;
-
           return;
         }
       }
@@ -869,12 +891,11 @@ wss.on("connection", (twilioWS) => {
           modalities: ["audio", "text"],
           conversation: "auto",
           instructions:
-            "Follow the FLOW_SCRIPT strictly. Confirm or summarize in one short sentence, then continue the flow. " +
-            "If booking failed or slot unavailable, briefly explain and offer two nearby times.\n\nFLOW_SCRIPT:\n" + FLOW_SCRIPT,
+            effectiveName === "book_appointment"
+              ? "Confirm the booking in one short sentence. If it failed, briefly explain and offer the next two options."
+              : "Summarize that day’s schedule in one short, friendly sentence. If none or error, say so briefly.",
         },
       });
-      // NEW: start barge-block window for this follow-up
-      bargeBlockUntilTs = Date.now() + BARGE_BLOCK_MS;
 
       delete openaiWS._toolCalls[callId];
     }
@@ -946,6 +967,11 @@ wss.on("connection", (twilioWS) => {
 
       resetUserCapture();
 
+      // Start dynamic noise calibration window
+      calibrationUntilTs = Date.now() + NOISE_CALIBRATION_MS;
+      rmsBaselineSum = 0;
+      rmsBaselineCount = 0;
+
       // Greeting (AI speaks)
       greetingInFlight = true; // use the global so guards stay off during greeting
       safeSendOpenAI({
@@ -957,9 +983,6 @@ wss.on("connection", (twilioWS) => {
             "Say exactly: 'Thank you for calling Mobile Pet Grooming, How can I help you today?'"
         },
       });
-      // NEW: start barge-block window for the greeting
-      bargeBlockUntilTs = Date.now() + BARGE_BLOCK_MS;
-
       awaitingResponse = true;
       return;
     }
