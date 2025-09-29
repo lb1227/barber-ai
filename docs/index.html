@@ -768,14 +768,79 @@ async function loadCloudState() {
   }
 }
 
+  async function upsertReceptionistConfig(partialCfg = {}) {
+  const { data: { session } } = await supabase.auth.getSession();
+  const user = session?.user;
+  if (!user) return { ok: false, reason: 'no-session' };
+
+  const cfg = {
+    user_id: user.id,
+    name: state.receptionist.name ?? 'Barber AI Receptionist',
+    greeting: state.receptionist.greeting ?? '',
+    voice: state.receptionist.voice ?? 'alloy',
+    rate: Number(state.receptionist.rate ?? 1.0),
+    barge_in: !!state.receptionist.bargeIn,
+    end_silence_ms: Number(state.receptionist.endSilenceMs ?? 1000),
+    timezone: state.receptionist.timezone ?? 'America/New_York',
+    phone: state.receptionist.phone ?? '',
+    ...partialCfg, // allow overrides
+  };
+
+  const { error } = await supabase
+    .from('receptionist_config')
+    .upsert(cfg)
+    .select('user_id'); // forces error surfaces
+  return { ok: !error, error };
+}
+
+async function fetchReceptionistConfig() {
+  const { data: { session } } = await supabase.auth.getSession();
+  const user = session?.user;
+  if (!user) return null;
+
+  const { data, error } = await supabase
+    .from('receptionist_config')
+    .select('*')
+    .eq('user_id', user.id)
+    .maybeSingle();
+
+  if (error) {
+    console.warn('[cloud] receptionist_config fetch error', error);
+    return null;
+  }
+  return data;
+}
+
+async function ensureReceptionistRowExists() {
+  const cfg = await fetchReceptionistConfig();
+  if (cfg) return; // already exists
+  await upsertReceptionistConfig(); // writes current state.receptionist as their row
+}
+
 // Convenience: when user logs in, hydrate UI from cloud (or seed cloud)
 async function hydrateFromCloudAndRepaint() {
-  const ok = await loadCloudState();
+  const okState = await loadCloudState(); // your existing barber_state load (scheduling)
+
+  // Pull receptionist_config too and merge if present
+ const cfg = await fetchReceptionistConfig();
+  if (cfg) {
+    state.receptionist = {
+    ...state.receptionist,
+    name: cfg.name ?? state.receptionist.name,
+    greeting: cfg.greeting ?? state.receptionist.greeting,
+    voice: cfg.voice ?? state.receptionist.voice,
+    rate: typeof cfg.rate === 'number' ? cfg.rate : state.receptionist.rate,
+    bargeIn: typeof cfg.barge_in === 'boolean' ? cfg.barge_in : state.receptionist.bargeIn,
+    endSilenceMs: typeof cfg.end_silence_ms === 'number' ? cfg.end_silence_ms : state.receptionist.endSilenceMs,
+    timezone: cfg.timezone ?? state.receptionist.timezone,+     phone: cfg.phone ?? state.receptionist.phone,
+   };
+    saveLocalOnly(); // persist merged receptionist to localStorage
+  }
   // Repaint either way to reflect whatever we have
   renderWeek();
   renderMonth();
   paintReceptionistForm?.();
-  return ok;
+  return okState;
 }
 
 /* ---------- DOM refs ---------- */
@@ -1191,11 +1256,21 @@ clearBlackouts.addEventListener('click', ()=>{
   save(); renderMonth(); renderWeek();
 });
 
-  if (rcpSave) {
-  rcpSave.addEventListener('click', ()=>{
-    saveReceptionistFromForm();
+if (rcpSave) {
+  rcpSave.addEventListener('click', async () => {
+    // 1) Update in-memory + local
+    saveReceptionistFromForm(); // this already copies fields into state.receptionist and calls save()
+
+    // 2) Try cloud upsert if user is signed in
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session) {
+      const res = await upsertReceptionistConfig();
+      if (!res.ok) console.warn('[cloud] upsert receptionist_config failed', res.error);
+    }
+
+    // small UX ping
     rcpSave.textContent = "Saved!";
-    setTimeout(()=> rcpSave.textContent = "Save", 900);
+    setTimeout(() => (rcpSave.textContent = "Save"), 900);
   });
 }
 if (rcpReset) {
@@ -1509,6 +1584,7 @@ window.doSignOut = doSignOut; // ensure your button calls this exact one
   
         if (event === 'SIGNED_IN' && session) {
           await hydrateFromCloudAndRepaint();
+          await ensureReceptionistRowExists();
           gotoSchedulingIfNotThere({ replace: true });
         }
   
