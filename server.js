@@ -1127,7 +1127,7 @@ wss.on("connection", (twilioWS) => {
   });
 
   // ---------- Twilio inbound ----------
-  twilioWS.on("message", (raw) => {
+  twilioWS.on("message", async (raw) => {
     let msg;
     try {
       msg = JSON.parse(raw.toString());
