@@ -30,6 +30,7 @@ const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN;
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY env var");
+  console.error("Missing OPENAI_API_KEY env var");
   process.exit(1);
 }
 
@@ -239,13 +240,25 @@ const INSTRUCTIONS =
     "",
     "# Single-question policy (STRICT)",
     "- Ask for **exactly one** piece of information per turn.",
-    "- The **only allowed pair** is: **“What day and time work best for your appointment?”**",
+    "- Allowed pairs (and only these): **date + time** (when picking a slot) and **phone + address** (final step to confirm booking).",
     "- Never combine other fields in one sentence (e.g., **no** “name and phone”, **no** “service and date”).",
-    "- Never join requests with “and”; ask one thing only.",
+    "- Never join requests with “and” unless it’s one of the two allowed pairs.",
     "- If you start a second request, **stop** and wait for the caller.",
-    "- Collect in this order: **name → service → phone → date & time**.",
-    "- After each answer, acknowledge briefly and ask the next single question.",
-    "- End your turn immediately after asking the question, and **always end with a question mark**.",
+    "- Collect in this order: **name → service → species → weight → date & time → phone + address**.",
+    "- After each answer, acknowledge briefly and ask the next single question. End your turn with a single question mark.",
+    "",
+    "# FLOW: When caller asks to book:",
+    "1) Ask: \"Awesome I can go ahead and help you with that, can I start by getting your name for the booking?\"",
+    "2) After name: Ask: \"Alright <name>, what kind of service were you looking to book today? A full grooming or just a bath?\"",
+    "3) After service: Ask: \"Perfect, will we be grooming a dog or a cat today?\"",
+    "4) After species: Ask: \"Sounds good, and do you know the approximate weight of your dog/cat?\"",
+    "5) After weight: Ask: \"Got it! And what date and time works best for you?\"",
+    "6) After date/time: Call list_appointments for that date. If the requested time is free, say:",
+    "   \"Okay, there is availability <date> at <time>. In order to get you booked, can I get your phone number and address?\"",
+    "   If not free, offer two nearest alternatives and ask which works.",
+    "7) After phone and address (together): Call book_appointment. Put species, weight, and address in the notes.",
+    "8) After booking: Say: \"Alright <name>, I have you booked for <time> <date>. Is there anything else I can help you with?\"",
+    "Rules: One question per turn EXCEPT steps 5 (date + time) and 7 (phone + address).",
   ].join("\n");
 
 // ---------- Start Twilio recording via REST (dual channels, both tracks) ----------
@@ -397,12 +410,14 @@ wss.on("connection", (twilioWS) => {
     }
   }
 
+  // >>> UPDATED: allow phone+address pair
   function isDisallowedDoubleQuestion(text) {
     const s = (text || "").toLowerCase();
 
     const nameTokens    = ["name", "first name", "last name"];
     const serviceTokens = ["service", "groom", "grooming", "bath", "nail", "trim"];
     const phoneTokens   = ["phone", "phone number", "callback", "contact number"];
+    const addressTokens = ["address", "street", "st.", "ave", "avenue", "blvd", "road", "rd", "zip", "zip code", "zipcode", "city", "state"];
     const dateTokens    = ["date", "day", "today", "tomorrow", "monday","tuesday","wednesday","thursday","friday","saturday","sunday"];
     const timeTokens    = ["time", "am", "pm", "morning", "afternoon", "evening"];
 
@@ -411,10 +426,15 @@ wss.on("connection", (twilioWS) => {
     if (hasAny(nameTokens))    cats.add("name");
     if (hasAny(serviceTokens)) cats.add("service");
     if (hasAny(phoneTokens))   cats.add("phone");
+    if (hasAny(addressTokens)) cats.add("address");
     if (hasAny(dateTokens))    cats.add("date");
     if (hasAny(timeTokens))    cats.add("time");
 
-    if (cats.size === 2 && cats.has("date") && cats.has("time")) return false;
+    // Allowed pairs:
+    if (cats.size === 2 && cats.has("date") && cats.has("time")) return false;     // date + time
+    if (cats.size === 2 && cats.has("phone") && cats.has("address")) return false; // phone + address
+
+    // Everything else that mixes ≥2 categories is disallowed
     return cats.size >= 2;
   }
 
@@ -757,7 +777,7 @@ wss.on("connection", (twilioWS) => {
           }
         }
 
-        // EARLY STOP: detect disallowed double-question (except date+time pair).
+        // EARLY STOP: detect disallowed double-question (except allowed pairs).
         // Defer ~120ms so audio doesn't clip.
         if (!questionCutTimer && isDisallowedDoubleQuestion(assistantUtterance)) {
           questionCutTimer = setTimeout(() => {
