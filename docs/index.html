@@ -1194,295 +1194,201 @@ window.getSchedulePayload = () => ({
 ------------------------------------------------------ */
 </script>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-<script>
-  const SUPABASE_URL = "https://rfodbzbekelwmvjsntda.supabase.co";
-  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJmb2RiemJla2Vsd212anNudGRhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTkxMDk2OTQsImV4cCI6MjA3NDY4NTY5NH0.yggTGamGf69NeToTDDvjHRycXbLERfkaFowK-Q1a6-s";
-  console.log('supabase global?', !!window.supabase); // should log true
-  const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-   // --- HARD DEBUG START ---
-  console.log('[debug] window.supabase exists:', !!window.supabase);
-  console.log('[debug] createClient exists:', !!window.supabase?.createClient);
-
-  // If supabase failed to load, bail early with a loud message.
-  if (!window.supabase?.createClient) {
-    const m = 'Supabase UMD not loaded. Check the script URL or adblock.';
-    console.error('[debug]', m);
-    alert(m);
-  }
-
-  // Check DOM hook-ups for auth elements
-  const _btnIn  = document.getElementById('btnSignIn');
-  const _btnUp  = document.getElementById('btnSignUp');
-  const _email  = document.getElementById('authEmail');
-  const _pass   = document.getElementById('authPassword');
-  console.log('[debug] found elements:', { _btnIn: !!_btnIn, _btnUp: !!_btnUp, _email: !!_email, _pass: !!_pass });
-
-  // Add a guaranteed global click logger so we know clicks fire at all
-  document.addEventListener('click', (e) => {
-    if (e.target?.id) console.log('[debug] click on #'+e.target.id);
-  });
-
-  // Force-open the auth modal once on load so we can test the inner buttons
-  (function forceOpenAuthOnce(){
-    const authView = document.getElementById('authView');
-    if (authView) {
-      authView.style.display = 'flex';
-      document.querySelector('.app').style.filter = 'blur(4px)';
-      document.querySelector('.app').style.pointerEvents = 'none';
-      console.log('[debug] forced auth modal open');
-    }
-  })();
-
-  // Wrap Supabase getSession to see errors
-  (async () => {
-    try {
-      const test = await supabase.auth.getSession();
-      console.log('[debug] getSession ok:', !!test?.data?.session);
-    } catch (err) {
-      console.error('[debug] getSession error:', err);
-      alert('getSession failed (see console). Likely Supabase not loaded or blocked.');
-    }
-  })();
-  // --- HARD DEBUG END ---
-</script>
 
 <script>
-  // SAFETY NET: show any hidden errors
-  window.addEventListener('unhandledrejection', e => console.error('[unhandled]', e.reason));
-  window.addEventListener('error', e => console.error('[error]', e.error || e.message));
-  
-  const appRoot   = document.querySelector('.app');
-  const authView  = document.getElementById('authView');
-  const authEmail = document.getElementById('authEmail');
-  const authPass  = document.getElementById('authPassword');
-  const btnIn     = document.getElementById('btnSignIn');
-  const btnUp     = document.getElementById('btnSignUp');
-  const authMsg   = document.getElementById('authMsg');
-  const btnGuest  = document.getElementById('btnGuest');
+/* ========= SUPABASE CLIENT ========= */
+const SUPABASE_URL = "https://rfodbzbekelwmvjsntda.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJmb2RiemJla2Vsd212anNudGRhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTkxMDk2OTQsImV4cCI6MjA3NDY4NTY5NH0.yggTGamGf69NeToTDDvjHRycXbLERfkaFowK-Q1a6-s";
 
-  function msg(text){ authMsg.textContent = text || ''; }
+console.debug('[debug] window.supabase exists:', !!window.supabase);
+console.debug('[debug] createClient exists:', !!window.supabase?.createClient);
 
-  // --- Avatar helpers ---
-  function initialsFromEmail(email = "") {
-    const name = email.split("@")[0].replace(/[^a-z0-9]+/gi, " ").trim();
-    const parts = name.split(" ").filter(Boolean);
-    const first = parts[0]?.[0] || email?.[0] || "?";
-    const second = parts[1]?.[0] || "";
-    return (first + second).toUpperCase();
-  }
-  function displayNameFromUser(user) {
-    return user?.user_metadata?.full_name || user?.email || "User";
-  }
-  
-  function setAuthScreen(visible){
-    const appRoot = document.querySelector('.app');
-    const authView = document.getElementById('authView');
-    if (!appRoot || !authView) return;
-    authView.style.display   = visible ? 'flex' : 'none';
-    appRoot.style.filter     = visible ? 'blur(4px)' : 'none';
-    appRoot.style.pointerEvents = visible ? 'none' : 'auto';
+const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+/* ========= DOM HOOKS ========= */
+const appRoot   = document.querySelector('.app');
+const authView  = document.getElementById('authView');
+const authEmail = document.getElementById('authEmail');
+const authPass  = document.getElementById('authPassword');
+const btnIn     = document.getElementById('btnSignIn');
+const btnUp     = document.getElementById('btnSignUp');
+const btnGuest  = document.getElementById('btnGuest');
+const authMsg   = document.getElementById('authMsg');
+
+function msg(text){ if (authMsg) authMsg.textContent = text || ''; }
+
+/* ========= SHOW/HIDE AUTH ========= */
+function setAuthScreen(visible){
+  if (!appRoot || !authView) return;
+  console.debug('[auth] setAuthScreen ->', visible);
+  authView.style.display   = visible ? 'flex' : 'none';
+  appRoot.style.filter     = visible ? 'blur(4px)' : 'none';
+  appRoot.style.pointerEvents = visible ? 'none' : 'auto';
+}
+
+/* ========= TOPBAR ========= */
+async function renderTopbar(){
+  const wrap = document.getElementById("topbarAccount");
+  if (!wrap) return;
+
+  const { data: { session } } = await supabase.auth.getSession();
+  const user = session?.user || null;
+  const isGuest = !user && (localStorage.getItem('barber_guest_mode') === 'true');
+
+  if (!user && !isGuest){
+    wrap.innerHTML = `
+      <button class="btn small" id="tbSignIn">Sign In</button>
+      <button class="btn small secondary" id="tbSignUp">Sign Up</button>
+    `;
+    document.getElementById("tbSignIn")?.addEventListener("click", () => setAuthScreen(true));
+    document.getElementById("tbSignUp")?.addEventListener("click", () => setAuthScreen(true));
+    return;
   }
 
-  btnIn?.addEventListener('click', async () => {
-    msg('');
-    const email = (authEmail?.value || '').trim();
-    const password = authPass?.value || '';
-    if (!email || !password){ msg('Enter email and password.'); return; }
-  
-    btnIn.disabled = true; btnUp.disabled = true;
-    try {
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      console.log('[signIn] data:', data, 'error:', error);
-      if (error) { msg(error.message); return; }
-      if (!data?.session) { msg('Signed in, but no session returned.'); return; }
-  
-      localStorage.removeItem('barber_guest_mode');
-      await refreshAuthUI();     // hides modal + updates topbar
-      await loadCloudState();    // pulls your saved state
-      renderWeek(); renderMonth();
-      authEmail.value = ''; authPass.value = ''; // clear fields
-    } catch (e) {
-      console.error('[signIn] exception', e);
-      msg('Sign in failed. See console for details.');
-    } finally {
-      btnIn.disabled = false; btnUp.disabled = false;
+  const displayName = isGuest ? "Guest" : (user?.user_metadata?.full_name || user?.email || "User");
+  const initials = (isGuest ? "G" : (user?.email || displayName || "?"))
+    .split("@")[0].replace(/[^a-z0-9]+/gi," ").trim().split(" ").map(s=>s[0]).join("").slice(0,2).toUpperCase() || "U";
+
+  wrap.innerHTML = `
+    <button class="avatar-btn" id="acctBtn" aria-haspopup="menu" aria-expanded="false">
+      <span class="avatar-circle">${initials}</span>
+      <span class="avatar-name">${displayName}</span>
+    </button>
+    <div class="menu" id="acctMenu" role="menu">
+      ${isGuest ? `
+        <div style="padding:6px 10px; color:#8a93a6;">Browsing as guest</div>
+        <button class="mi" id="miSignIn" role="menuitem">Sign In</button>
+      ` : `
+        <button class="mi" id="miAccount" role="menuitem">Account</button>
+        <button class="mi" id="miSignOut" role="menuitem">Sign Out</button>
+      `}
+    </div>
+  `;
+
+  const btn = document.getElementById('acctBtn');
+  const menu = document.getElementById('acctMenu');
+  function closeMenu() {
+    menu.classList.remove("open");
+    btn.setAttribute("aria-expanded", "false");
+    document.removeEventListener("click", onDocClick);
+    document.removeEventListener("keydown", onEsc);
+  }
+  function onDocClick(e) { if (!menu.contains(e.target) && e.target !== btn) closeMenu(); }
+  function onEsc(e) { if (e.key === "Escape") closeMenu(); }
+
+  btn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    const open = menu.classList.toggle("open");
+    btn.setAttribute("aria-expanded", String(open));
+    if (open) {
+      setTimeout(() => {
+        document.addEventListener("click", onDocClick);
+        document.addEventListener("keydown", onEsc);
+      }, 0);
+    } else {
+      closeMenu();
     }
   });
-  
-  btnUp?.addEventListener('click', async () => {
-    msg('');
-    const email = (authEmail?.value || '').trim();
-    const password = authPass?.value || '';
-    if (!email || !password){ msg('Enter email and password.'); return; }
-  
-    btnIn.disabled = true; btnUp.disabled = true;
-    try {
-      const { data, error } = await supabase.auth.signUp({ email, password });
-      console.log('[signUp] data:', data, 'error:', error);
-      if (error) { msg(error.message); return; }
-  
-      if (!data?.session) {
-        msg('Check your email to confirm your account, then sign in.');
-        return;
-      }
-  
-      localStorage.removeItem('barber_guest_mode');
-      msg('Account created. You are now signed in.');
-      await refreshAuthUI();
-      await loadCloudState();
-      renderWeek(); renderMonth();
-      authEmail.value = ''; authPass.value = '';
-    } catch (e) {
-      console.error('[signUp] exception', e);
-      msg('Sign up failed. See console for details.');
-    } finally {
-      btnIn.disabled = false; btnUp.disabled = false;
-    }
+
+  document.getElementById('miAccount')?.addEventListener('click', ()=> {
+    document.querySelector('.nav-item[data-view="account"]')?.click();
+    closeMenu();
   });
-
-
-  btnGuest?.addEventListener('click', async () => {
-    localStorage.setItem('barber_guest_mode', 'true'); // flag guest mode
-    await refreshAuthUI();                              // hides modal + shows "Guest" in topbar
-  });
-
-  // Add a Sign Out button somewhere you want (e.g., sidebar). If you have no button yet, you can later add:
-  // <button id="btnSignOut" class="secondary">Sign Out</button>
-  document.getElementById('btnSignOut')?.addEventListener('click', async ()=>{
+  document.getElementById('miSignOut')?.addEventListener('click', async ()=>{
     await supabase.auth.signOut();
+    localStorage.removeItem('barber_guest_mode');
+    closeMenu();
     await refreshAuthUI();
   });
+  document.getElementById('miSignIn')?.addEventListener('click', ()=>{
+    localStorage.removeItem('barber_guest_mode');
+    setAuthScreen(true);
+    closeMenu();
+  });
+}
 
- // --- Topbar rendering ---
-  function nameFromEmail(email){
-    if (!email) return "Account";
-    const base = email.split("@")[0] || "Account";
-    return base.replace(/[._-]+/g," ").replace(/\b\w/g, c=>c.toUpperCase());
-  }
-  function initialFromEmail(email){
-    const n = nameFromEmail(email);
-    return (n.trim()[0] || "A").toUpperCase();
-  }
+/* ========= CENTRAL AUTH REFRESH ========= */
+async function refreshAuthUI(){
+  const { data: { session }, error } = await supabase.auth.getSession();
+  const hasSession = !!session;
+  const isGuest = localStorage.getItem('barber_guest_mode') === 'true';
+  console.debug('[auth] refreshAuthUI ->', { hasSession, isGuest, error });
 
-  async function renderTopbar(){
-    const wrap = document.getElementById("topbarAccount");
-    if (!wrap) return;
-  
-    const guestMode = localStorage.getItem("barber_guest_mode") === "true";
-    const { data: { session } } = await supabase.auth.getSession();
-    const user = session?.user || null;
-  
-    // If real user exists, real user wins over guest flag.
-    const isGuest = !user && guestMode;
-  
-    if (!user && !isGuest){
-      wrap.innerHTML = `
-        <button class="btn small" id="tbSignIn">Sign In</button>
-        <button class="btn small secondary" id="tbSignUp">Sign Up</button>
-      `;
-      document.getElementById("tbSignIn")?.addEventListener("click", () => {
-        document.getElementById("authView").style.display = "flex";
-      });
-      document.getElementById("tbSignUp")?.addEventListener("click", () => {
-        document.getElementById("authView").style.display = "flex";
-      });
+  // Only show modal if NOT logged in AND NOT guest
+  setAuthScreen(!hasSession && !isGuest);
+
+  await renderTopbar();
+}
+
+/* ========= BUTTON HANDLERS ========= */
+btnGuest?.addEventListener('click', async () => {
+  console.debug('[auth] Guest clicked');
+  localStorage.setItem('barber_guest_mode', 'true');
+  await refreshAuthUI();                 // single source of truth
+  if (authEmail) authEmail.value = '';
+  if (authPass)  authPass.value  = '';
+  msg('Browsing as guest.');
+});
+
+btnIn?.addEventListener('click', async () => {
+  msg('');
+  const email = (authEmail?.value || '').trim();
+  const password = authPass?.value || '';
+  if (!email || !password){ msg('Enter email and password.'); return; }
+
+  try {
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    console.log('[signIn] data:', data, 'error:', error);
+    if (error) { msg(error.message); return; }
+
+    if (!data?.session) {
+      msg('Signed in, but no session returned. Check email verification.');
       return;
     }
-
-    // Logged in OR guest
-    const email = session?.user?.email || "guest@barber.ai";
-    const displayName = isGuest ? "Guest" : (user?.user_metadata?.full_name || user?.email || "User");
-    const initials = (isGuest ? "G" : (user?.email || displayName || "?"))
-      .split("@")[0].replace(/[^a-z0-9]+/gi," ").trim().split(" ").map(s=>s[0]).join("").slice(0,2).toUpperCase() || "U";
-
-    wrap.innerHTML = `
-      <button class="avatar-btn" id="acctBtn" aria-haspopup="menu" aria-expanded="false">
-        <span class="avatar-circle">${initials}</span>
-        <span class="avatar-name">${displayName}</span>
-      </button>
-      <div class="menu" id="acctMenu" role="menu">
-        ${isGuest ? `
-          <div style="padding:6px 10px; color:#8a93a6;">Browsing as guest</div>
-          <button class="mi" id="miSignIn" role="menuitem">Sign In</button>
-        ` : `
-          <button class="mi" id="miAccount" role="menuitem">Account</button>
-          <button class="mi" id="miSignOut" role="menuitem">Sign Out</button>
-        `}
-      </div>
-    `;
-
-    // Toggle menu
-    const btn = document.getElementById('acctBtn');
-    const menu = document.getElementById('acctMenu');
-    function closeMenu() {
-      menu.classList.remove("open");
-      btn.setAttribute("aria-expanded", "false");
-      document.removeEventListener("click", onDocClick);
-      document.removeEventListener("keydown", onEsc);
-    }
-    function onDocClick(e) {
-      if (!menu.contains(e.target) && e.target !== btn) closeMenu();
-    }
-    function onEsc(e) {
-      if (e.key === "Escape") closeMenu();
-    }
-
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const open = menu.classList.toggle("open");
-      btn.setAttribute("aria-expanded", String(open));
-      if (open) {
-        // attach once per open
-        setTimeout(() => {
-          document.addEventListener("click", onDocClick);
-          document.addEventListener("keydown", onEsc);
-        }, 0);
-      } else {
-        closeMenu();
-      }
-    });
-
-    // Menu actions
-    document.getElementById('miAccount')?.addEventListener('click', ()=> {
-    document.querySelector('.nav-item[data-view="account"]')?.click();
-      closeMenu();
-    });
-    document.getElementById('miSignOut')?.addEventListener('click', async ()=>{
-      await supabase.auth.signOut();
-      localStorage.removeItem('barber_guest_mode');
-      closeMenu();
-      refreshAuthUI();
-    });
-    document.getElementById('miSignIn')?.addEventListener('click', ()=>{
-      localStorage.removeItem('barber_guest_mode');
-      document.getElementById('authView').style.display = 'flex';
-      closeMenu();
-    });
-  }
-
-  // Hook the topbar into your existing auth flow
-  async function refreshAuthUI(){
-    // Don’t early-return on guest if a real session exists.
-    const { data: { session } } = await supabase.auth.getSession();
-    const hasSession = !!session;
-  
-    // Show auth overlay only if no session and not guest.
-    const isGuest = localStorage.getItem('barber_guest_mode') === 'true';
-    setAuthScreen(!hasSession && !isGuest);
-  
-    await renderTopbar();
-  }
-
-  supabase.auth.onAuthStateChange(async (_event, session) => {
-    if (session) localStorage.removeItem('barber_guest_mode');
+    localStorage.removeItem('barber_guest_mode');
     await refreshAuthUI();
-    await loadCloudState();   // ✅ now valid
-    renderWeek();
-    renderMonth();
-  });
+    await loadCloudState?.();
+    window.renderWeek?.(); window.renderMonth?.();
+  } catch (e) {
+    console.error('[signIn] exception', e);
+    msg('Sign in failed. See console.');
+  }
+});
 
-  // Kick off
-  refreshAuthUI();
+btnUp?.addEventListener('click', async () => {
+  msg('');
+  const email = (authEmail?.value || '').trim();
+  const password = authPass?.value || '';
+  if (!email || !password){ msg('Enter email and password.'); return; }
+
+  try {
+    const { data, error } = await supabase.auth.signUp({ email, password });
+    console.log('[signUp] data:', data, 'error:', error);
+    if (error) { msg(error.message); return; }
+
+    if (!data?.session) { msg('Check your email to confirm, then sign in.'); return; }
+
+    localStorage.removeItem('barber_guest_mode');
+    msg('Account created. You are now signed in.');
+    await refreshAuthUI();
+    await loadCloudState?.();
+    window.renderWeek?.(); window.renderMonth?.();
+  } catch (e) {
+    console.error('[signUp] exception', e);
+    msg('Sign up failed. See console.');
+  }
+});
+
+/* ========= AUTH STATE LISTENER ========= */
+supabase.auth.onAuthStateChange(async (_event, session) => {
+  if (session) localStorage.removeItem('barber_guest_mode');
+  await refreshAuthUI();
+  await loadCloudState?.();
+  window.renderWeek?.(); window.renderMonth?.();
+});
+
+/* ========= BOOT ========= */
+refreshAuthUI();
 </script>
 
 
