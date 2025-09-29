@@ -902,11 +902,7 @@ acctResetPw?.addEventListener('click', async ()=>{
   acctMsg.textContent = error ? error.message : "Reset email sent.";
 });
 
-acctSignOut?.addEventListener('click', async ()=>{
-  await supabase.auth.signOut();
-  localStorage.removeItem('barber_guest_mode');
-  await refreshAuthUI();
-});
+acctSignOut?.addEventListener('click', () => doSignOut('account-view'));
 
 function saveReceptionistFromForm(){
   state.receptionist = {
@@ -1301,13 +1297,28 @@ window.getSchedulePayload = () => ({
     renderTopbar();
   });
 
-  // Add a Sign Out button somewhere you want (e.g., sidebar). If you have no button yet, you can later add:
-  // <button id="btnSignOut" class="secondary">Sign Out</button>
-  document.getElementById('btnSignOut')?.addEventListener('click', async ()=>{
-    await supabase.auth.signOut();
-    await refreshAuthUI();
-  });
+// --- signout ---
+  async function doSignOut(source = 'unknown') {
+  try {
+    console.log(`[signout] clicked from: ${source}`);
+    const { error } = await supabase.auth.signOut(); // v2 SDK
+    if (error) throw error;
 
+    // No ghost guest mode
+    localStorage.removeItem('barber_guest_mode');
+
+    // Re-render immediately, then the auth state listener will fire too
+    await refreshAuthUI();
+    setAuthScreen(true);
+
+    // sanity: check session really gone
+    const { data: { session } } = await supabase.auth.getSession();
+    console.log('[signout] session after signOut:', session);
+  } catch (e) {
+    console.error('[signout] error', e);
+    alert('Sign out failed: ' + (e?.message || e));
+  }
+}
  // --- Topbar rendering ---
   function nameFromEmail(email){
     if (!email) return "Account";
@@ -1402,11 +1413,11 @@ window.getSchedulePayload = () => ({
     document.querySelector('.nav-item[data-view="account"]')?.click();
       closeMenu();
     });
-    document.getElementById('miSignOut')?.addEventListener('click', async ()=>{
-      await supabase.auth.signOut();
-      localStorage.removeItem('barber_guest_mode');
-      closeMenu();
-      refreshAuthUI();
+    document.getElementById('miSignOut')?.addEventListener('click', async () => {
+      // close the menu first so it doesn’t trap clicks
+      const menu = document.getElementById('acctMenu');
+      menu?.classList.remove('open');
+      await doSignOut('topbar-menu');
     });
     document.getElementById('miSignIn')?.addEventListener('click', ()=>{
       localStorage.removeItem('barber_guest_mode');
