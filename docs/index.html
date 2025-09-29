@@ -666,7 +666,59 @@ let state = {
     phone: ""
   }
 };
-function save(){ localStorage.setItem(storeKey, JSON.stringify(state)); }
+async function getSessionUser() {
+  const { data: { session } } = await supabase.auth.getSession();
+  return session?.user || null;
+}
+
+async function loadCloudState() {
+  const user = await getSessionUser();
+  if (!user) return false;
+
+  const { data, error } = await supabase
+    .from('barber_state')
+    .select('data')
+    .eq('user_id', user.id)
+    .single();
+
+  if (error && error.code !== 'PGRST116') {
+    console.warn('Cloud load error', error);
+    return false;
+  }
+  if (data?.data) {
+    state = {
+      ...state,
+      ...data.data,
+      weekCursor: data.data.weekCursor ? new Date(data.data.weekCursor) : state.weekCursor,
+      monthCursor: data.data.monthCursor ? new Date(data.data.monthCursor) : state.monthCursor,
+    };
+    saveLocalOnly();  // keep a local copy as backup
+    return true;
+  } else {
+    // Create empty row if first time
+    await supabase.from('barber_state').insert({ user_id: user.id, data: state });
+    return true;
+  }
+}
+
+async function saveCloudState() {
+  const user = await getSessionUser();
+  if (!user) return;
+  const payload = {
+    ...state,
+    weekCursor: state.weekCursor?.toISOString?.(),
+    monthCursor: state.monthCursor?.toISOString?.(),
+  };
+  await supabase.from('barber_state')
+    .upsert({ user_id: user.id, data: payload });
+}
+
+// Replace your old save() with:
+function save() {
+  localStorage.setItem("barber_gui_state_v1", JSON.stringify(state));
+  // Push to cloud too
+  saveCloudState();
+}
 function load(){
   try{
     const raw = localStorage.getItem(storeKey);
@@ -1187,6 +1239,9 @@ window.getSchedulePayload = () => ({
     if (error){ authMsg.textContent = error.message; return; }
     localStorage.removeItem('barber_guest_mode');   // <— important
     await refreshAuthUI();
+    await loadCloudState();   // <— this pulls their saved schedule
+    renderWeek();
+    renderMonth();
   });
   
   btnUp?.addEventListener('click', async () => {
@@ -1199,6 +1254,9 @@ window.getSchedulePayload = () => ({
     localStorage.removeItem('barber_guest_mode');   // <— important
     authMsg.textContent = 'Account created. You are now signed in.';
     await refreshAuthUI();
+    await loadCloudState();   // <— this pulls their saved schedule
+    renderWeek();
+    renderMonth();
   });
 
 
@@ -1338,6 +1396,9 @@ window.getSchedulePayload = () => ({
   supabase.auth.onAuthStateChange((_event, _session) => {
     // Only one call; refreshAuthUI() will render the topbar.
     refreshAuthUI();
+    await loadCloudState();   // <— this pulls their saved schedule
+    renderWeek();
+    renderMonth();
   });
 
   // Kick off
