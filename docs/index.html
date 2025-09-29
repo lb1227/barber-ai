@@ -948,7 +948,7 @@ async function saveCloudState() {
     };
     const { error } = await supabase
       .from('barber_state')
-      .upsert({ user_id: user.id, data: payload });
+      .upsert({ user_id: user.id, data: payload }, { onConflict: 'user_id' });
 
     if (error) console.warn('[cloud] save error:', error);
   } catch (err) {
