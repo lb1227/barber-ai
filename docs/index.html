@@ -1520,6 +1520,59 @@ paintReceptionistForm();
   console.assert(heads === 8, `Expected 8 headers (including top-left), got ${heads}`);
 })();
 
+  // ===== DEBUG + GUARD PATCH FOR AUTH MODAL =====
+(() => {
+  const modal = document.getElementById('authView');
+  const app   = document.querySelector('.app');
+
+  // Log any external changes to modal.style
+  new MutationObserver((muts) => {
+    muts.forEach(m => {
+      console.log('[MO] authView style changed ->', modal.getAttribute('style'));
+    });
+  }).observe(modal, { attributes:true, attributeFilter:['style'] });
+
+  // Keep last intent & debounce hides for a moment after a show
+  let lastIntent = null;       // 'show' | 'hide'
+  let safeUntil  = 0;          // timestamp
+
+  // Monkey-patch setAuthScreen
+  const _orig = window.setAuthScreen;
+  window.setAuthScreen = function(visible){
+    const by = new Error('[TRACE setAuthScreen]').stack;
+    console.debug('[auth] setAuthScreen call ->', visible, '\n', by);
+
+    const now = Date.now();
+    if (visible) {
+      lastIntent = 'show';
+      safeUntil = now + 1200; // 1.2s grace to block accidental hide
+      modal.style.setProperty('display','flex','important');
+      modal.style.setProperty('z-index','9999','important');
+      modal.style.setProperty('position','fixed','important');
+      modal.style.setProperty('inset','0','important');
+      app.style.setProperty('filter','blur(4px)','important');
+      app.style.setProperty('pointer-events','none','important');
+    } else {
+      // Block hides if they happen immediately after a show (likely a race)
+      if (now < safeUntil && lastIntent === 'show') {
+        console.warn('[auth] hide suppressed (race after show)');
+        return;
+      }
+      lastIntent = 'hide';
+      modal.style.setProperty('display','none','important');
+      app.style.setProperty('filter','none','important');
+      app.style.setProperty('pointer-events','auto','important');
+    }
+  };
+
+  // Add global helpers to test quickly
+  window.showAuth = () => window.setAuthScreen(true);
+  window.hideAuth = () => window.setAuthScreen(false);
+
+  console.log('[auth] debug patch installed');
+})();
+
+
 /* ---------- Public API (future backend hook) ----------
 window.getSchedulePayload = () => ({
   slotLen: state.slotLen,
