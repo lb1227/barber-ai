@@ -1204,7 +1204,7 @@ window.getSchedulePayload = () => ({
     `;
 
     // Toggle menu
-    const btn = document.getElementById('avatarBtn');
+    const btn = document.getElementById('acctBtn');
     const menu = document.getElementById('acctMenu');
     function closeMenu() {
       menu.classList.remove("open");
@@ -1235,7 +1235,6 @@ window.getSchedulePayload = () => ({
     });
 
     // Menu actions
-    document.getElementById('miDocs')?.addEventListener('click', ()=> window.open('https://github.com/','_blank'));
     document.getElementById('miAccount')?.addEventListener('click', ()=> {
       // route to Edit Receptionist as "account" area
       document.querySelector('.nav-item[data-view="receptionist"]')?.click();
