@@ -1123,33 +1123,32 @@ function buildNextTurnPrompt(cfg = {}) {
     if (msg.event === "start") {
       streamSid = msg.start.streamSid;
       twilioReady = true;
-      primeTwilioStreamWithSilence();
-
+    
       const callSid = msg.start?.callSid;
       startTwilioRecording(callSid).catch(console.error);
-
-      console.log("[Start] customParameters =", custom);
-      const custom = msg.start?.customParameters || {};
-      const userId = custom.user_id || null;
+    
+      // ✅ declare FIRST, and use a different name to avoid collisions
+      const startParams = msg.start?.customParameters || {};
+      const userId = startParams.user_id || null;
+      console.log("[/media start] customParameters =", startParams, "userId =", userId ?? "default");
     
       // Load per-account config
       let userCfg = null;
       if (userId) {
         try { userCfg = await getConfigForUser(userId); } catch (e) { console.warn(e); }
       }
-      // Fallback defaults if mapping missing
       userCfg ??= {
-         name: "Business Receptionist",
+        name: "Business Receptionist",
         greeting: "Hello, thanks for calling! How can I help you today?",
         voice: "verse",
         rate: 1.0, barge_in: true, end_silence_ms: 1000, timezone: "America/New_York"
       };
+    
       CURRENT_NEXT_TURN_PROMPT = buildNextTurnPrompt(userCfg);
-      ASSISTANT_INSTRUCTIONS = buildAssistantInstructions(userCfg);
+      const ASSISTANT_INSTRUCTIONS = buildAssistantInstructions(userCfg);
       const TOOLS = buildTools(userCfg);
-
-      console.log(`[Call start] streamSid=${streamSid} userId=${userId || 'default'} config=`, userCfg);
-      // Apply per-account voice/settings to the OpenAI session
+    
+      // Session update
       safeSendOpenAI({
         type: "session.update",
         session: {
@@ -1163,20 +1162,20 @@ function buildNextTurnPrompt(cfg = {}) {
         }
       });
     
-      // Start greeting using the account’s custom greeting
+      // Send greeting
       greetingInFlight = true;
       safeSendOpenAI({
         type: "response.create",
         response: {
-          modalities: ["audio", "text"],
+          modalities: ["audio","text"],
           conversation: "auto",
-          instructions: `Say exactly: "${userCfg.greeting || "Thank you for calling, how can I help you today?"}"`,
+          instructions: userCfg.greeting || "Thank you for calling—how can I help you today?"
         }
       });
     
-      // (start recording etc…)
       return;
     }
+
 
     if (msg.event === "media") {
       const b64 = msg.media?.payload;
