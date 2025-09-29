@@ -1099,76 +1099,6 @@ window.getSchedulePayload = () => ({
     return user?.user_metadata?.full_name || user?.email || "User";
   }
   
-  // --- Topbar render ---  
-    // Signed-in or Guest → avatar + menu
-    const isGuest = guest && !user;
-    const name = isGuest ? "Guest" : displayNameFromUser(user);
-    const initials = isGuest ? "G" : initialsFromEmail(user?.email || name);
-  
-    wrap.innerHTML = `
-      <button class="avatar-btn" id="acctBtn" aria-haspopup="menu" aria-expanded="false">
-        <span class="avatar-circle">${initials}</span>
-        <span class="avatar-name">${name}</span>
-      </button>
-      <div class="menu" id="acctMenu" role="menu">
-        ${isGuest ? `
-          <button class="mi" id="miSignIn" role="menuitem">Sign In</button>
-        ` : `
-          <button class="mi" id="miAccount" role="menuitem">Account</button>
-          <button class="mi" id="miSignOut" role="menuitem">Sign Out</button>
-        `}
-      </div>
-    `;
-  
-    const btn = document.getElementById("acctBtn");
-    const menu = document.getElementById("acctMenu");
-  
-    function closeMenu() {
-      menu.classList.remove("open");
-      btn.setAttribute("aria-expanded", "false");
-      document.removeEventListener("click", onDocClick);
-      document.removeEventListener("keydown", onEsc);
-    }
-    function onDocClick(e) {
-      if (!menu.contains(e.target) && e.target !== btn) closeMenu();
-    }
-    function onEsc(e) {
-      if (e.key === "Escape") closeMenu();
-    }
-  
-    btn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      const open = menu.classList.toggle("open");
-      btn.setAttribute("aria-expanded", String(open));
-      if (open) {
-        setTimeout(() => {
-          document.addEventListener("click", onDocClick);
-          document.addEventListener("keydown", onEsc);
-        }, 0);
-      } else {
-        closeMenu();
-      }
-    });
-  
-    // menu actions
-    document.getElementById("miSignIn")?.addEventListener("click", () => {
-      closeMenu();
-      document.getElementById("authView").style.display = "flex";
-    });
-    document.getElementById("miAccount")?.addEventListener("click", () => {
-      closeMenu();
-      // route to a future “Account” view or open a modal
-      alert("Account panel coming soon.");
-    });
-    document.getElementById("miSignOut")?.addEventListener("click", async () => {
-      closeMenu();
-      await supabase.auth.signOut();
-      localStorage.removeItem("barber_guest_mode");
-      await refreshAuthUI();   // hide auth overlay if needed
-      renderTopbar();          // re-render topbar to show Sign In / Sign Up
-    });
-  }
-
   function setAuthScreen(visible){
     const appRoot = document.querySelector('.app');
     const authView = document.getElementById('authView');
@@ -1276,13 +1206,33 @@ window.getSchedulePayload = () => ({
     // Toggle menu
     const btn = document.getElementById('avatarBtn');
     const menu = document.getElementById('acctMenu');
-    function closeMenu(){ menu.classList.remove('open'); btn.setAttribute('aria-expanded','false'); }
-    btn?.addEventListener('click', (e)=>{
+    function closeMenu() {
+      menu.classList.remove("open");
+      btn.setAttribute("aria-expanded", "false");
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onEsc);
+    }
+    function onDocClick(e) {
+      if (!menu.contains(e.target) && e.target !== btn) closeMenu();
+    }
+    function onEsc(e) {
+      if (e.key === "Escape") closeMenu();
+    }
+
+    btn.addEventListener("click", (e) => {
       e.stopPropagation();
-      const open = menu.classList.toggle('open');
-      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+      const open = menu.classList.toggle("open");
+      btn.setAttribute("aria-expanded", String(open));
+      if (open) {
+        // attach once per open
+        setTimeout(() => {
+          document.addEventListener("click", onDocClick);
+          document.addEventListener("keydown", onEsc);
+        }, 0);
+      } else {
+        closeMenu();
+      }
     });
-    document.addEventListener('click', closeMenu);
 
     // Menu actions
     document.getElementById('miDocs')?.addEventListener('click', ()=> window.open('https://github.com/','_blank'));
