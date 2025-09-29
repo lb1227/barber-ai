@@ -837,39 +837,48 @@ async function apiFetch(path, opts = {}) {
   return res.json();
 }
 
+function getReceptionistPayloadFromState() {
+  return {
+    name:       state.receptionist.name,
+    greeting:   state.receptionist.greeting,
+    voice:      state.receptionist.voice,
+    rate:       Number(state.receptionist.rate),
+    barge_in:   !!state.receptionist.bargeIn,
+    end_silence_ms: Number(state.receptionist.endSilenceMs),
+    timezone:   state.receptionist.timezone,
+    phone:      state.receptionist.phone || ''
+  };
+}
+
 // Convenience: when user logs in, hydrate UI from cloud (or seed cloud)
 async function hydrateFromCloudAndRepaint() {
-  // 1) Try to pull config from your backend API
   try {
     const cfg = await apiFetch('/api/me/config'); // GET
-    if (cfg && typeof cfg === 'object') {
-      state.receptionist = {
-        ...state.receptionist,
-        name:         cfg.name ?? state.receptionist.name,
-        greeting:     cfg.greeting ?? state.receptionist.greeting,
-        voice:        cfg.voice ?? state.receptionist.voice,
-        rate:         typeof cfg.rate === 'number' ? cfg.rate : state.receptionist.rate,
-        bargeIn:      typeof cfg.barge_in === 'boolean' ? cfg.barge_in : state.receptionist.bargeIn,
-        endSilenceMs: typeof cfg.end_silence_ms === 'number' ? cfg.end_silence_ms : state.receptionist.endSilenceMs,
-        timezone:     cfg.timezone ?? state.receptionist.timezone,
-        phone:        cfg.phone ?? state.receptionist.phone
-      };
-      saveLocalOnly(); // keep localStorage in sync
-    }
+    state.receptionist = {
+      ...state.receptionist,
+      name:         cfg.name ?? state.receptionist.name,
+      greeting:     cfg.greeting ?? state.receptionist.greeting,
+      voice:        cfg.voice ?? state.receptionist.voice,
+      rate:         typeof cfg.rate === 'number' ? cfg.rate : state.receptionist.rate,
+      bargeIn:      typeof cfg.barge_in === 'boolean' ? cfg.barge_in : state.receptionist.bargeIn,
+      endSilenceMs: typeof cfg.end_silence_ms === 'number' ? cfg.endSilenceMs : state.receptionist.endSilenceMs,
+      timezone:     cfg.timezone ?? state.receptionist.timezone,
+      phone:        cfg.phone ?? state.receptionist.phone
+    };
+    saveLocalOnly();
   } catch (e) {
-    console.warn('[api] fetch /api/me/config failed; continuing with local state', e);
+    console.warn('[api] GET /api/me/config failed; using local state', e);
   }
 
-  // 2) (Optional) also load your scheduling blob if you still use it
+  // (optional) also call your existing loadCloudState() for scheduling
   try { await loadCloudState(); } catch {}
 
-  // 3) Repaint UI
   renderWeek();
   renderMonth();
   paintReceptionistForm?.();
-
   return true;
 }
+
 
 /* ---------- DOM refs ---------- */
 const startHour = document.getElementById('startHour');
@@ -1287,25 +1296,22 @@ clearBlackouts.addEventListener('click', ()=>{
 
 if (rcpSave) {
   rcpSave?.addEventListener('click', async () => {
-  // 1) pull values from the form into state + localStorage
-  saveReceptionistFromForm();
-
-  // 2) push to backend if signed in
-  try {
-    const { data: { session } } = await supabase.auth.getSession();
-    if (session) {
-      await apiFetch('/api/me/config', {
-        method: 'PUT',
-        body: JSON.stringify(getReceptionistPayloadFromState())
-      });
+    saveReceptionistFromForm();
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) {
+        await apiFetch('/api/me/config', {
+          method: 'PUT',
+          body: JSON.stringify(getReceptionistPayloadFromState())
+        });
+      }
+    } catch (e) {
+      console.warn('[api] PUT /api/me/config failed', e);
     }
-  } catch (e) {
-    console.warn('[api] PUT /api/me/config failed', e);
-  }
-
-    // small UX ping
-    rcpSave.textContent = "Saved!";
-    setTimeout(() => (rcpSave.textContent = "Save"), 900);
+    rcpSave.disabled = true;
+    const old = rcpSave.textContent;
+    rcpSave.textContent = "Saved ✅";
+    setTimeout(() => { rcpSave.textContent = old; rcpSave.disabled = false; }, 900);
   });
 }
 if (rcpReset) {
