@@ -33,7 +33,9 @@ const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN;
 const ENFORCE_FIXED_GREETING = false; // disable for per-account greetings
+const EXPECTED_GREETING = "thank you for calling, how can i help you today?";
 let CURRENT_NEXT_TURN_PROMPT = "";
+let ASSISTANT_INSTRUCTIONS = "";
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY env var");
@@ -329,33 +331,59 @@ const POST_BOT_TURN_COOLDOWN_MS = 300;  // shorter echo guard so we don't eat us
 const MIN_WL_PEAKS_USER_TURN = 1;       // require at least one word-like peak
 
 // === NEW: enforce exact greeting + brief pause before listening ===
-const EXPECTED_GREETING = "thank you for calling mobile pet grooming, how can i help you today?";
 const POST_GREETING_COOLDOWN_MS = 700; // ~0.7s pause after greeting
 
 // === Identity, task & style ===
-const INSTRUCTIONS =
-  [
-    "You are a **Mobile Pet Grooming Assistant** for a small business.",
-    "Your primary tasks: **book, reschedule, and cancel appointments**, and **answer basic questions** about services, pricing ranges, service areas, hours, and simple policies.",
-    "Scope guard: **only** discuss topics related to mobile pet grooming. If asked something unrelated, politely steer back to grooming and booking.",
-    "",
+function buildAssistantInstructions(cfg = {}) {
+  const role = cfg.role || "Receptionist";
+  const scope = cfg.scope || `Only discuss topics related to ${cfg.business_name || "this business"} and booking/logistics.`;
+  const style = [
     "# Style",
-    "- Tone: **warm, conversational, and slightly upbeat**.",
-    "- Enthusiasm: **calm and positive**—welcoming, not flat.",
-    "- Formality: **casual but slightly professional**.",
-    "- Emotion: **appropriately expressive**; empathetic and polite.",
-    "- Pacing: **slightly brisk**. Keep replies short (≈8–14 words).",
+    "- Tone: warm, conversational, slightly upbeat.",
+    "- Enthusiasm: calm and positive—welcoming, not flat.",
+    "- Formality: casual but slightly professional.",
+    "- Pacing: slightly brisk. Keep replies short (≈8–14 words).",
+  ].join("\n");
+
+  const order = (cfg.ask_order || ["name","service","date_time","phone_address"])
+    .map(k => ({name:"name", service:"service", date_time:"date & time", phone_address:"phone + address"}[k] || k))
+    .join(" → ");
+
+  const pairs = cfg.allowed_pairs || ["date_time","phone_address"];
+  const pairsText = [
+    pairs.includes("date_time") ? "date + time" : null,
+    pairs.includes("phone_address") ? "phone + address" : null,
+  ].filter(Boolean).join(") and (");
+
+  return [
+    `You are a **${role}** for a small business.`,
+    "Your primary tasks: book, reschedule, cancel appointments, and answer basic questions (services, pricing ranges, service areas, hours, simple policies).",
+    `Scope guard: ${scope}`,
+    "",
+    style,
     "",
     "# Single-question policy (STRICT)",
-    "- Ask for **exactly one** piece of information per turn.",
-    "- Allowed pairs: **(date + time)** and **(phone + address)** only.",
-    "- Collect in this order: **name → service → species (dog/cat) → weight (approx lbs) → date & time → phone + address**.",
-    "- When asking species, say: **“What kind of pet will we be grooming today?”** Do NOT add the weight question in the same turn.",
-    "- After the caller answers species, then ask weight as: **“Sounds good. Do you know the approximate weight of your <dog/cat>?”** (fill the species word).",
-    "- Never join other fields; if you start a second request, **stop** and wait.",
+    "- Ask for exactly one piece of information per turn.",
+    `- Collect in this order: **${order}**.`,
+    `- Allowed pairs: **(${pairsText || "none"})** only.`,
     "- After each answer, acknowledge briefly and ask the next (single) question.",
     "- Always end your turn with a single question mark.",
   ].join("\n");
+}
+
+const TOOLS = buildTools(userCfg);
+safeSendOpenAI({
+  type: "session.update",
+  session: {
+    modalities: ["text","audio"],
+    voice: userCfg.voice || "verse",
+    output_audio_format: "g711_ulaw",
+    input_audio_format:  "g711_ulaw",
+    tools: TOOLS,
+    tool_choice: "auto",
+    instructions: ASSISTANT_INSTRUCTIONS,
+  }
+});
 
 // ---------- Start Twilio recording via REST (dual channels, both tracks) ----------
 async function startTwilioRecording(callSid) {
@@ -511,9 +539,7 @@ wss.on("connection", (twilioWS) => {
     const s = (text || "").toLowerCase();
 
     const nameTokens    = ["name", "first name", "last name"];
-    const serviceTokens = ["service", "groom", "grooming", "bath", "nail", "trim"];
-    const speciesTokens = ["species", "dog", "cat", "pet"];
-    const weightTokens  = ["weight", "weigh", "pounds", "lbs", "lb"];
+    const serviceTokens = ["service", "appointment", "quote", "estimate", "consultation"];
     const phoneTokens   = ["phone", "phone number", "callback", "contact number"];
     const addressTokens = ["address", "street", "zip", "zipcode", "postal", "city", "state"];
     const dateTokens    = ["date", "day", "today", "tomorrow", "monday","tuesday","wednesday","thursday","friday","saturday","sunday"];
@@ -545,9 +571,7 @@ wss.on("connection", (twilioWS) => {
       response: {
         modalities: ["audio", "text"],
         conversation: "auto",
-        instructions:
-          "Ask **only one** concise question for the next missing field (order: name → service → species (dog/cat) → weight (approx lbs) → date & time → phone + address). " +
-          "Do not combine fields. Allowed pairs: “date and time” or “phone and address” only.",
+        instructions: CURRENT_NEXT_TURN_PROMPT,
       },
     });
   }
@@ -715,126 +739,52 @@ function buildNextTurnPrompt(cfg = {}) {
     }
   }
 
-  // ---------- UPDATED: require species, weight_lbs, address ----------
-  async function handleBookAppointment(args) {
-    const {
-      customer_name,
-      phone,
-      service,
-      species,
-      weight_lbs,
-      address,
-      start_iso,
-      duration_min = 30,
-      notes = "",
-      attendees = [],
-    } = args || {};
+  // ---------- handling appointments ----------
+ async function handleBookAppointment(args, cfg = {}) {
+  const required = cfg.required_fields || ["customer_name","service","start_iso","phone","address"];
+  const PHONE_RE = /(?:\+?\d[\d\s().-]{6,}\d)/;
 
-    const PHONE_RE = /(?:\+?\d[\d\s().-]{6,}\d)/;
+  // validate required
+  const need = required.filter(f => !args?.[f]);
+  if (need.length) return { ok: false, error: `Missing required fields: ${need.join(", ")}` };
+  if (!PHONE_RE.test(String(args.phone))) return { ok: false, error: "Invalid phone number." };
 
-    if (!customer_name || !service || !species || !weight_lbs || !start_iso || !phone || !address) {
-      return { ok: false, error: "Missing required fields." };
-    }
-    if (!["dog","cat"].includes(String(species).toLowerCase())) {
-      return { ok: false, error: "Species must be dog or cat." };
-    }
-    if (!PHONE_RE.test(String(phone))) {
-      return { ok: false, error: "Invalid phone number." };
-    }
+  const start = new Date(args.start_iso);
+  if (isNaN(start.getTime())) return { ok: false, error: "Invalid start time." };
+  const end = new Date(start.getTime() + (Number(args.duration_min ?? 30) * 60 * 1000));
 
-    const start = new Date(start_iso);
-    if (isNaN(start.getTime())) {
-      return { ok: false, error: "Invalid start time." };
+  // build description from provided fields (hide secrets if any)
+  const lines = [
+    "Booked by phone receptionist.",
+    `Phone: ${args.phone}`,
+    `Address: ${args.address}`,
+  ];
+  Object.keys(args).forEach(k => {
+    if (!["phone","address","start_iso","duration_min","attendees","customer_name","service"].includes(k)) {
+      lines.push(`${k}: ${args[k]}`);
     }
-    const end = new Date(start.getTime() + duration_min * 60 * 1000);
+  });
+  if (args.notes) lines.push(`Notes: ${args.notes}`);
 
-    const summary = `${service} — ${customer_name}`;
-    const description =
-      `Booked by phone receptionist.\n` +
-      `Phone: ${phone}\n` +
-      `Species: ${species}\n` +
-      `Weight (lbs): ${weight_lbs}\n` +
-      `Address: ${address}\n` +
-      (notes ? `Notes: ${notes}\n` : "");
-
-    try {
-      const ev = await createEvent({
-        summary,
-        start: start.toISOString(),
-        end: end.toISOString(),
-        attendees,
-        description,
-      });
-      return {
-        ok: true,
-        id: ev.id,
-        htmlLink: ev.htmlLink,
-        start: ev.start?.dateTime,
-        end: ev.end?.dateTime,
-        summary: ev.summary,
-      };
-    } catch (e) {
-      return { ok: false, error: e?.message || "Calendar error" };
-    }
+  const summary = `${args.service} — ${args.customer_name}`;
+  try {
+    const ev = await createEvent({
+      summary,
+      start: start.toISOString(),
+      end: end.toISOString(),
+      attendees: args.attendees || [],
+      description: lines.join("\n"),
+    });
+    return { ok: true, id: ev.id, htmlLink: ev.htmlLink, start: ev.start?.dateTime, end: ev.end?.dateTime, summary: ev.summary };
+  } catch (e) {
+    return { ok: false, error: e?.message || "Calendar error" };
   }
+}
 
   // ---------- OpenAI socket ----------
   openaiWS.on("open", () => {
     console.log("[OpenAI] WS open]");
-    // Configure to be reactive; our VAD drives turns.
-    /*safeSendOpenAI({
-      type: "session.update",
-      session: {
-        modalities: ["text", "audio"],
-        voice: "verse", // consistent female voice
-        output_audio_format: "g711_ulaw",
-        input_audio_format: "g711_ulaw",
-
-        tools: [
-          {
-            type: "function",
-            name: "book_appointment",
-            description:
-              "Create a Google Calendar event for a mobile pet grooming service. Ask for any missing details before calling this.",
-            parameters: {
-              type: "object",
-              properties: {
-                customer_name: { type: "string", description: "Caller’s name" },
-                phone: { type: "string", description: "Caller phone" },
-                service: { type: "string", description: "Service name (e.g., full grooming, bath)" },
-                species: { type: "string", enum: ["dog", "cat"], description: "Dog or cat" },
-                weight_lbs: { type: "number", minimum: 1, maximum: 250, description: "Approximate weight in pounds" },
-                address: { type: "string", description: "Service address (street, city, ZIP)" },
-                start_iso: {
-                  type: "string",
-                  description: "Start time in ISO 8601 with timezone (e.g. 2025-09-10T15:00:00-04:00)"
-                },
-                duration_min: { type: "number", description: "Duration in minutes", default: 30 },
-                notes: { type: "string", description: "Optional extra notes (pet breed/size, address/ZIP, etc.)" },
-                attendees: { type: "array", items: { type: "string" }, description: "Optional attendee emails" }
-              },
-              required: ["customer_name","service","species","weight_lbs","start_iso","phone","address"],
-            },
-          },
-          {
-            type: "function",
-            name: "list_appointments",
-            description: "List Google Calendar events for a specific day (today, tomorrow, or date_iso).",
-            parameters: {
-              type: "object",
-              properties: {
-                day: { type: "string", enum: ["today", "tomorrow"], description: "Shortcut day selector" },
-                date_iso: { type: "string", description: "Any date in ISO 8601; time ignored (e.g. 2025-09-18)" }
-              }
-            }
-          }
-        ],
-        tool_choice: "auto",
-
-        instructions: INSTRUCTIONS,
-      },
-    }); */
-
+    
   while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
   });
 
@@ -1001,114 +951,89 @@ function buildNextTurnPrompt(cfg = {}) {
       return;
     }
 
-    function isBookingArgs(args) {
-      return !!(args &&
-        args.customer_name &&
-        args.service &&
-        args.species &&
-        args.weight_lbs &&
-        args.start_iso &&
-        args.phone &&
-        args.address);
+    function isBookingArgs(args, cfg = {}) {
+      const required = cfg.required_fields || ["customer_name","service","start_iso","phone","address"];
+      return required.every(f => args && args[f]);
     }
     function isListArgs(args) { return !!(args && (args.day || args.date_iso)); }
+
+    function followupPromptFor(nextField, args = {}, cfg = {}) {
+      const custom = (cfg.field_prompts || {})[nextField];
+      if (custom) return custom;
+    
+      const defaults = {
+        customer_name: "Can I get your name for the booking?",
+        service: "What service would you like to book?",
+        date_time: "What date and time work best for your appointment?",
+        phone: "What’s the best phone number to reach you?",
+        address: "What’s the service address, including street and ZIP?"
+      };
+      return defaults[nextField] || `Could you share your ${nextField}?`;
+    }
 
     async function finishToolCall(callId) {
       const entry = openaiWS._toolCalls[callId];
       if (!callId || !entry) return;
-
+    
       const args = parseToolArgs(entry.argsText || "{}");
       const rawName = (entry.name || "").toLowerCase();
+    
+      // decide tool using config-driven required fields
       const effectiveName =
-        rawName || (isBookingArgs(args) ? "book_appointment" : isListArgs(args) ? "list_appointments" : "");
-
-      console.log("[TOOL NAME]", effectiveName || "(missing)", "args=", args);
-
+        rawName || (isBookingArgs(args, userCfg) ? "book_appointment"
+                : isListArgs(args) ? "list_appointments" : "");
+    
       if (effectiveName === "book_appointment") {
-        // Hard gate: do not allow booking until all your required fields exist & look valid
-        const need = [];
-        const PHONE_RE = /(?:\+?\d[\d\s().-]{6,}\d)/;
-
-        if (!args?.customer_name) need.push("customer_name");
-        if (!args?.service) need.push("service");
-        if (!args?.species) need.push("species");
-        if (args?.species && !["dog","cat"].includes(String(args.species).toLowerCase())) need.push("species");
-        if (!args?.weight_lbs || Number(args.weight_lbs) <= 0) need.push("weight_lbs");
-        if (!args?.start_iso) need.push("start_iso");
-        if (!args?.phone || !PHONE_RE.test(String(args.phone))) need.push("phone");
-        if (!args?.address) need.push("address");
-
+        const required = userCfg.required_fields || ["customer_name","service","start_iso","phone","address"];
+        const need = required.filter(f => !args?.[f]);                 // ✅ define need
         if (need.length) {
-          // Ask ONLY the next missing item (with allowed doubles: date+time, phone+address)
-          let followup = "";
-          const order = ["customer_name","service","species","weight_lbs","start_iso","phone","address"];
+          const order = userCfg.ask_order_mapped_to_fields || ["customer_name","service","start_iso","phone","address"];
           const next = order.find(f => need.includes(f));
-
-          if (next === "customer_name") {
-            followup = "Can I get your name for the booking?";
-          } else if (next === "service") {
-            followup = "What kind of service would you like to book today—full grooming or just a bath?";
-          } else if (next === "species") {
-            followup = "What kind of pet will we be grooming today?";
-          } else if (next === "weight_lbs") {
-            const sp = (args?.species || "").toString().toLowerCase();
-            const animal = (sp === "dog" || sp === "cat") ? sp : "pet";
-            followup = `Sounds good. Do you know the approximate weight of your ${animal}?`;
-          } else if (next === "start_iso") {
-            followup = "What date and time work best for your appointment?";
-          } else if (next === "phone") {
-            if (need.includes("address") && !need.some(f => ["customer_name","service","species","weight_lbs","start_iso"].includes(f))) {
-              followup = "To get you booked, can I get your phone number and service address?";
-            } else {
-              followup = "What’s the best phone number to reach you?";
-            }
-          } else if (next === "address") {
-            followup = "What’s the service address, including street and ZIP?";
-          }
-
+          const followup = next === "start_iso" && need.includes("start_iso") && need.includes("time_iso")
+            ? (userCfg.field_prompts?.date_time || "What date and time work best for your appointment?")
+            : followupPromptFor(next, args, userCfg);
+    
           if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
           awaitingResponse = true;
           safeSendOpenAI({
             type: "response.create",
-            response: {
-              modalities: ["audio","text"],
-              conversation: "auto",
-              instructions: followup
-            },
+            response: { modalities: ["audio","text"], conversation: "auto", instructions: followup },
           });
-          return; // do NOT proceed to booking yet
+          return; // don’t book yet
         }
       }
-
+    
+      // run the tool
       let result = { ok: false, error: "Unknown tool" };
       if (effectiveName === "book_appointment") {
-        result = await handleBookAppointment(args);
+        result = await handleBookAppointment(args, userCfg);    // ✅ pass userCfg
       } else if (effectiveName === "list_appointments") {
         result = await handleListAppointments(args);
       } else {
         console.log("[TOOL ROUTING] Unknown tool name:", rawName, "args=", args);
       }
-
+    
+      // send tool result and wrap up the turn
       safeSendOpenAI({
         type: "conversation.item.create",
         item: { type: "function_call_output", call_id: callId, output: JSON.stringify(result) },
       });
-
+    
       if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
       safeSendOpenAI({
         type: "response.create",
         response: {
-          modalities: ["audio", "text"],
+          modalities: ["audio","text"],
           conversation: "auto",
-          instructions:
-            effectiveName === "book_appointment"
-              ? "Confirm the booking with the exact date and time in one short sentence, then say: “Is there anything else I can help you with?” Do **not** ask new questions unless the caller asks."
-              : "Summarize that day’s schedule in one short, friendly sentence. If none or error, say so briefly.",
+          instructions: effectiveName === "book_appointment"
+            ? "Confirm the booking with the exact date and time in one short sentence, then say: “Is there anything else I can help you with?” Do not ask new questions unless the caller asks."
+            : "Summarize that day’s schedule in one short, friendly sentence. If none or error, say so briefly.",
         },
       });
-
+    
       delete openaiWS._toolCalls[callId];
     }
+
 
     if (msg.type === "response.output_item.added" && msg.item?.type === "function_call") {
       const { id: itemId, name, arguments: chunk } = msg.item;
@@ -1156,42 +1081,6 @@ function buildNextTurnPrompt(cfg = {}) {
     }
   });
 
-  const TOOLS = [
-  {
-    type: "function",
-    name: "book_appointment",
-    description: "Create a Google Calendar event for a mobile pet grooming service. Ask for any missing details before calling this.",
-    parameters: {
-      type: "object",
-      properties: {
-        customer_name: { type: "string", description: "Caller’s name" },
-        phone: { type: "string", description: "Caller phone" },
-        service: { type: "string", description: "Service name (e.g., full grooming, bath)" },
-        species: { type: "string", enum: ["dog", "cat"], description: "Dog or cat" },
-        weight_lbs: { type: "number", minimum: 1, maximum: 250, description: "Approximate weight in pounds" },
-        address: { type: "string", description: "Service address (street, city, ZIP)" },
-        start_iso: { type: "string", description: "Start time in ISO 8601 with timezone" },
-        duration_min: { type: "number", description: "Duration in minutes", default: 30 },
-        notes: { type: "string", description: "Optional extra notes (pet breed/size, address/ZIP, etc.)" },
-        attendees: { type: "array", items: { type: "string" }, description: "Optional attendee emails" }
-      },
-      required: ["customer_name","service","species","weight_lbs","start_iso","phone","address"],
-    },
-  },
-  {
-    type: "function",
-    name: "list_appointments",
-    description: "List Google Calendar events for a specific day (today, tomorrow, or date_iso).",
-    parameters: {
-      type: "object",
-      properties: {
-        day: { type: "string", enum: ["today", "tomorrow"], description: "Shortcut day selector" },
-        date_iso: { type: "string", description: "Any date in ISO 8601; time ignored" }
-      }
-    }
-  }
-];
-
   // ---------- Twilio inbound ----------
   twilioWS.on("message", async (raw) => {
     let msg;
@@ -1225,6 +1114,7 @@ function buildNextTurnPrompt(cfg = {}) {
         rate: 1.0, barge_in: true, end_silence_ms: 1000, timezone: "America/New_York"
       };
       CURRENT_NEXT_TURN_PROMPT = buildNextTurnPrompt(userCfg);
+      ASSISTANT_INSTRUCTIONS = buildAssistantInstructions(userCfg);
 
       console.log(`[Call start] streamSid=${streamSid} userId=${userId || 'default'} config=`, userCfg);
       // Apply per-account voice/settings to the OpenAI session
@@ -1237,7 +1127,7 @@ function buildNextTurnPrompt(cfg = {}) {
           input_audio_format:  "g711_ulaw",
           tools: TOOLS,
           tool_choice: "auto",
-          instructions: INSTRUCTIONS
+          instructions: ASSISTANT_INSTRUCTIONS,
         }
       });
     
