@@ -721,9 +721,14 @@ async function saveCloudState() {
 
     // Serialize dates so PostgREST doesn’t choke on Date objects
     const payload = {
-      ...state,
-      weekCursor: state.weekCursor?.toISOString?.() || null,
-      monthCursor: state.monthCursor?.toISOString?.() || null,
+      name: state.receptionist.name,
+      greeting: state.receptionist.greeting,
+      voice: state.receptionist.voice,
+      rate: Number(state.receptionist.rate),
+      barge_in: !!state.receptionist.bargeIn,
+      end_silence_ms: Number(state.receptionist.endSilenceMs),
+      timezone: state.receptionist.timezone,
+      phone: state.receptionist.phone || ''
     };
 
     const { error } = await supabase
@@ -822,30 +827,48 @@ async function ensureReceptionistRowExists() {
   await upsertReceptionistConfig(); // writes current state.receptionist as their row
 }
 
+async function apiFetch(path, opts = {}) {
+  const { data: { session } } = await supabase.auth.getSession();
+  const token = session?.access_token;
+  const headers = { "Content-Type": "application/json", ...(opts.headers || {}) };
+  if (token) headers.Authorization = `Bearer ${token}`;
+  const res = await fetch(path, { ...opts, headers });
+  if (!res.ok) throw new Error(`API ${res.status}`);
+  return res.json();
+}
+
 // Convenience: when user logs in, hydrate UI from cloud (or seed cloud)
 async function hydrateFromCloudAndRepaint() {
-  const okState = await loadCloudState();
-
-  const cfg = await fetchReceptionistConfig();
-  if (cfg) {
-    state.receptionist = {
-      ...state.receptionist,
-      name: cfg.name ?? state.receptionist.name,
-      greeting: cfg.greeting ?? state.receptionist.greeting,
-      voice: cfg.voice ?? state.receptionist.voice,
-      rate: typeof cfg.rate === 'number' ? cfg.rate : state.receptionist.rate,
-      bargeIn: typeof cfg.barge_in === 'boolean' ? cfg.barge_in : state.receptionist.bargeIn,
-      endSilenceMs: typeof cfg.end_silence_ms === 'number' ? cfg.endSilenceMs : state.receptionist.endSilenceMs,
-      timezone: cfg.timezone ?? state.receptionist.timezone,
-      phone: cfg.phone ?? state.receptionist.phone,
-    };
-    saveLocalOnly();
+  // 1) Try to pull config from your backend API
+  try {
+    const cfg = await apiFetch('/api/me/config'); // GET
+    if (cfg && typeof cfg === 'object') {
+      state.receptionist = {
+        ...state.receptionist,
+        name:         cfg.name ?? state.receptionist.name,
+        greeting:     cfg.greeting ?? state.receptionist.greeting,
+        voice:        cfg.voice ?? state.receptionist.voice,
+        rate:         typeof cfg.rate === 'number' ? cfg.rate : state.receptionist.rate,
+        bargeIn:      typeof cfg.barge_in === 'boolean' ? cfg.barge_in : state.receptionist.bargeIn,
+        endSilenceMs: typeof cfg.end_silence_ms === 'number' ? cfg.end_silence_ms : state.receptionist.endSilenceMs,
+        timezone:     cfg.timezone ?? state.receptionist.timezone,
+        phone:        cfg.phone ?? state.receptionist.phone
+      };
+      saveLocalOnly(); // keep localStorage in sync
+    }
+  } catch (e) {
+    console.warn('[api] fetch /api/me/config failed; continuing with local state', e);
   }
 
+  // 2) (Optional) also load your scheduling blob if you still use it
+  try { await loadCloudState(); } catch {}
+
+  // 3) Repaint UI
   renderWeek();
   renderMonth();
   paintReceptionistForm?.();
-  return okState;
+
+  return true;
 }
 
 /* ---------- DOM refs ---------- */
@@ -939,6 +962,7 @@ function gotoSchedulingIfNotThere(opts = { replace: true }) {
     location.hash = 'scheduling'; // creates a history entry
   }
 }
+  
  /* ---------- Receptionist hydrators and helpers ---------- */
   function paintReceptionistForm(){
   const r = state.receptionist;
@@ -1262,16 +1286,22 @@ clearBlackouts.addEventListener('click', ()=>{
 });
 
 if (rcpSave) {
-  rcpSave.addEventListener('click', async () => {
-    // 1) Update in-memory + local
-    saveReceptionistFromForm(); // this already copies fields into state.receptionist and calls save()
+  rcpSave?.addEventListener('click', async () => {
+  // 1) pull values from the form into state + localStorage
+  saveReceptionistFromForm();
 
-    // 2) Try cloud upsert if user is signed in
+  // 2) push to backend if signed in
+  try {
     const { data: { session } } = await supabase.auth.getSession();
     if (session) {
-      const res = await upsertReceptionistConfig();
-      if (!res.ok) console.warn('[cloud] upsert receptionist_config failed', res.error);
+      await apiFetch('/api/me/config', {
+        method: 'PUT',
+        body: JSON.stringify(getReceptionistPayloadFromState())
+      });
     }
+  } catch (e) {
+    console.warn('[api] PUT /api/me/config failed', e);
+  }
 
     // small UX ping
     rcpSave.textContent = "Saved!";
@@ -1308,11 +1338,16 @@ if (rcpReset) {
 const advSave = document.getElementById('advSave');
 advSave?.addEventListener('click', async () => {
   saveReceptionistFromForm();
-
-  const { data: { session } } = await supabase.auth.getSession();
-  if (session) {
-    const res = await upsertReceptionistConfig();
-    if (!res.ok) console.warn('[cloud] upsert receptionist_config failed', res.error);
+  try {
+    const { data: { session } } = await supabase.auth.getSession();
+    if (session) {
+      await apiFetch('/api/me/config', {
+        method: 'PUT',
+        body: JSON.stringify(getReceptionistPayloadFromState())
+      });
+    }
+  } catch (e) {
+    console.warn('[api] PUT /api/me/config failed', e);
   }
 
   advSave.textContent = "Saved!";
