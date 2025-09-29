@@ -202,23 +202,22 @@ function rmsOfMuLawBase64(b64) {
 }
 
 // ---------- Conversation policies (tunable) ----------
-// TIGHTER VAD (dynamic) — replaces your previous VAD block
 const VAD = {
   FRAME_MS: 20,          // Twilio sends ~20ms frames
-  RMS_START: 0.09,       // was 0.055/0.065 — stricter
-  RMS_CONTINUE: 0.065,   // was 0.040 — stricter
-  MIN_SPEECH_MS: 500,    // was 260/360 — need ~0.5s sustained speech
-  END_SILENCE_MS: 900,
-  BARGE_IN_MIN_MS: 350,  // slightly harder to barge
+  RMS_START: 0.055,
+  RMS_CONTINUE: 0.040,
+  MIN_SPEECH_MS: 260,    // was 320 (slightly quicker)
+  END_SILENCE_MS: 900,   // was 1200 (commit sooner)
+  BARGE_IN_MIN_MS: 220,  // require ~0.22s of speech to cancel assistant
   MAX_TURN_DURATION_MS: 6000,
 };
 const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
 
-// Dynamic noise floor & stability
-const NOISE_CALIBRATION_MS = 1500;      // measure background for first ~1.5s
-const MIN_CONSEC_FRAMES_START = 5;      // ~100ms over threshold to start a turn
-const MIN_CONSEC_FRAMES_CONTINUE = 3;   // stability while continuing
-const POST_BOT_TURN_COOLDOWN_MS = 350;  // small “echo guard” after bot ends
+// === Word-likeness gating (for barge-in only) — NEW ===
+const WL_WINDOW_MS = 900;               // look-back window for syllable-like peaks
+const MIN_WL_PEAKS_FOR_BARGE = 2;       // need ≥2 peaks in window to count as words
+const WL_HIGH_MARGIN = 0.02;            // how far above continue threshold to count a “peak”
+const POST_BOT_TURN_COOLDOWN_MS = 600;  // short echo guard after bot finishes
 
 // === NEW: enforce exact greeting + brief pause before listening ===
 const EXPECTED_GREETING = "thank you for calling mobile pet grooming, how can i help you today?";
@@ -247,10 +246,6 @@ const INSTRUCTIONS =
     "- Collect in this order: **name → service → phone → date & time**.",
     "- After each answer, acknowledge briefly and ask the next single question.",
     "- End your turn immediately after asking the question, and **always end with a question mark**.",
-    "",
-    "# Guided call flow prompts (key lines)",
-    "1) After booking intent: Ask: \"Awesome, I can help with that. Can I start by getting your name for the booking?\"",
-    "2) After name: Ask: \"Alright <name>, what kind of service would you like to book today, full grooming or just a bath?\""
   ].join("\n");
 
 // ---------- Start Twilio recording via REST (dual channels, both tracks) ----------
@@ -357,23 +352,17 @@ wss.on("connection", (twilioWS) => {
   let greetTranscript = "";
   let postGreetingUntilTs = 0;
 
-  // NEW: noise calibration & stability
-  let rmsBaselineSum = 0;
-  let rmsBaselineCount = 0;
-  let calibrationUntilTs = 0;
-
-  // NEW: short cooldown after bot finishes talking
-  let postBotUntilTs = 0;
-
-  // NEW: consecutive hot/continue frames
-  let consecHot = 0;
-  let consecCont = 0;
-
   // Guards for one-question-per-turn
   let assistantUtterance = "";         // live transcript during assistant speech
-  let sawQuestionStart = false;        // kept for compatibility
-  let singleQuestionCutApplied = false;// kept for compatibility
-  let questionCutTimer = null;         // defer-cancel timer to avoid clipping
+  let sawQuestionStart = false;        // (kept for compatibility; not used by simplified guard)
+  let singleQuestionCutApplied = false;// (kept for compatibility)
+  // Defer-cancel timer to avoid clipping the question audio
+  let questionCutTimer = null;
+
+  // NEW: word-likeness & echo cooldown
+  let wlAbove = false;
+  let wlPeakTimes = [];
+  let postBotUntilTs = 0;
 
   function resetUserCapture() {
     userSpeechActive = false;
@@ -385,28 +374,29 @@ wss.on("connection", (twilioWS) => {
     capturedFrames = [];
     sumLevel = 0;
     levelCount = 0;
-    consecHot = 0;
-    consecCont = 0;
+
+    // NEW: reset word-likeness
+    wlAbove = false;
+    wlPeakTimes = [];
   }
 
-  // === Dynamic noise helpers ===
-  function noiseBaseline() {
-    return rmsBaselineCount ? (rmsBaselineSum / rmsBaselineCount) : 0;
+  // === Word-likeness helpers (syllable-like peaks) — NEW ===
+  function recentWordlikePeaks() {
+    const now = Date.now();
+    wlPeakTimes = wlPeakTimes.filter(t => now - t < WL_WINDOW_MS);
+    return wlPeakTimes.length;
   }
-  function maybeCalibrate(level) {
-    if (Date.now() < calibrationUntilTs) {
-      rmsBaselineSum += level;
-      rmsBaselineCount += 1;
+
+  function updateWordlike(level, st, ct) {
+    const high = Math.max(ct + WL_HIGH_MARGIN, st + WL_HIGH_MARGIN);
+    if (!wlAbove && level >= high) {
+      wlAbove = true;
+    } else if (wlAbove && level < ct) {
+      wlAbove = false;
+      wlPeakTimes.push(Date.now());
     }
   }
-  function startThreshold() {
-    return Math.max(VAD.RMS_START, noiseBaseline() + 0.03);
-  }
-  function continueThreshold() {
-    return Math.max(VAD.RMS_CONTINUE, noiseBaseline() + 0.02);
-  }
 
-  // === Double-question detector (allow only “date and time”) — helper ===
   function isDisallowedDoubleQuestion(text) {
     const s = (text || "").toLowerCase();
 
@@ -445,51 +435,48 @@ wss.on("connection", (twilioWS) => {
 
   function appendUserAudio(b64) {
     const level = rmsOfMuLawBase64(b64);
-    maybeCalibrate(level);
 
-    // Don’t listen during greeting, right after greeting, or right after any bot turn
+    // Do NOT listen while greeting is speaking or during short cooldowns
     if (greetingInFlight || Date.now() < postGreetingUntilTs || Date.now() < postBotUntilTs) return;
 
+    // If the bot is talking or a response is in flight, allow barge-in only with strong, word-like speech
     if (isAssistantSpeaking || awaitingResponse) {
-      if (level >= startThreshold()) {
+      // Word-likeness tracking (syllable-like peaks)
+      updateWordlike(level, VAD.RMS_START, VAD.RMS_CONTINUE);
+
+      // Use a slightly higher threshold to start counting barge-in time
+      const bargeThresh = VAD.RMS_START + 0.02;
+      if (level >= bargeThresh) {
         bargeMs += VAD.FRAME_MS;
-        if (bargeMs >= VAD.BARGE_IN_MIN_MS) {
-          if (isAssistantSpeaking || awaitingResponse) {
-            safeSendOpenAI({ type: "response.cancel" });
-          }
-          isAssistantSpeaking = false;
-          awaitingResponse = false;
-          resetUserCapture();
-        }
       } else {
         bargeMs = 0;
+      }
+
+      const peaks = recentWordlikePeaks();
+      if (bargeMs >= VAD.BARGE_IN_MIN_MS && peaks >= MIN_WL_PEAKS_FOR_BARGE) {
+        // Only cancel if we heard sustained, word-like speech
+        safeSendOpenAI({ type: "response.cancel" });
+        isAssistantSpeaking = false;
+        awaitingResponse = false;
+        resetUserCapture();
       }
       return;
     }
 
-    const st = startThreshold();
-    const ct = continueThreshold();
-
+    // --- Normal VAD capture path (unchanged) ---
     if (!userSpeechActive) {
-      if (level >= st) {
-        consecHot += 1;
-        if (consecHot >= MIN_CONSEC_FRAMES_START) {
-          userSpeechActive = true;
-          userSpeechMs = MIN_CONSEC_FRAMES_START * VAD.FRAME_MS;
-          silenceMs = 0;
-          consecHot = 0;
-        }
+      if (level >= VAD.RMS_START) {
+        userSpeechActive = true;
+        userSpeechMs = VAD.FRAME_MS;
+        silenceMs = 0;
       } else {
-        consecHot = 0;
-        return; // still idle/noise
+        return;
       }
     } else {
-      if (level >= ct) {
-        consecCont += 1;
+      if (level >= VAD.RMS_CONTINUE) {
         userSpeechMs += VAD.FRAME_MS;
         silenceMs = 0;
       } else {
-        consecCont = 0;
         silenceMs += VAD.FRAME_MS;
       }
     }
@@ -804,6 +791,9 @@ wss.on("connection", (twilioWS) => {
       isAssistantSpeaking = false;
       awaitingResponse = false;
 
+      // NEW: short echo guard after bot finishes
+      postBotUntilTs = Date.now() + POST_BOT_TURN_COOLDOWN_MS;
+
       // clear any pending deferred cancel
       if (questionCutTimer) { clearTimeout(questionCutTimer); questionCutTimer = null; }
 
@@ -812,9 +802,6 @@ wss.on("connection", (twilioWS) => {
         postGreetingUntilTs = Date.now() + POST_GREETING_COOLDOWN_MS;
         greetTranscript = "";
       }
-
-      // NEW: add a small cooldown after ANY bot turn to avoid echo / self-trigger
-      postBotUntilTs = Date.now() + POST_BOT_TURN_COOLDOWN_MS;
 
       // reset guards at end of assistant turn
       assistantUtterance = "";
@@ -966,11 +953,6 @@ wss.on("connection", (twilioWS) => {
       startTwilioRecording(callSid).catch(console.error);
 
       resetUserCapture();
-
-      // Start dynamic noise calibration window
-      calibrationUntilTs = Date.now() + NOISE_CALIBRATION_MS;
-      rmsBaselineSum = 0;
-      rmsBaselineCount = 0;
 
       // Greeting (AI speaks)
       greetingInFlight = true; // use the global so guards stay off during greeting
