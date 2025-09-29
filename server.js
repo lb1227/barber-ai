@@ -205,8 +205,8 @@ function rmsOfMuLawBase64(b64) {
 // ---------- Conversation policies (tunable) ----------
 const VAD = {
   FRAME_MS: 20,          // Twilio sends ~20ms frames
-  RMS_START: 0.055,
-  RMS_CONTINUE: 0.040,
+  RMS_START: 0.050,
+  RMS_CONTINUE: 0.038,
   MIN_SPEECH_MS: 260,    // was 320 (slightly quicker)
   END_SILENCE_MS: 900,   // was 1200 (commit sooner)
   BARGE_IN_MIN_MS: 220,  // require ~0.22s of speech to cancel assistant
@@ -218,8 +218,8 @@ const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
 const WL_WINDOW_MS = 900;               // look-back window for syllable-like peaks
 const MIN_WL_PEAKS_FOR_BARGE = 2;       // need ≥2 peaks in window to count as words
 const WL_HIGH_MARGIN = 0.02;            // how far above continue threshold to count a “peak”
-const POST_BOT_TURN_COOLDOWN_MS = 900;  // slightly longer echo guard after bot finishes
-const MIN_WL_PEAKS_USER_TURN = 2;       // require word-like speech for user turns too
+const POST_BOT_TURN_COOLDOWN_MS = 300;  // shorter echo guard so we don't eat user speech
+const MIN_WL_PEAKS_USER_TURN = 1;       // require at least one word-like peak
 
 // === NEW: enforce exact greeting + brief pause before listening ===
 const EXPECTED_GREETING = "thank you for calling mobile pet grooming, how can i help you today?";
