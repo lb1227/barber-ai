@@ -919,6 +919,13 @@ function saveReceptionistFromForm(){
   save();
 }
 
+let __mouseupBound = false;
+function bindGlobalMouseupOnce(onUp){
+  if (__mouseupBound) return;
+  document.addEventListener('mouseup', onUp);
+  __mouseupBound = true;
+}
+
 /* ---------- Week view rendering ---------- */
 function renderWeek(){
   const slot = 15;   
@@ -1002,7 +1009,7 @@ function renderWeek(){
     cell.classList.toggle('active', dragMode);
   };
   const onUp = ()=>{ isDragging=false; dragMode=null; save(); };
-  document.addEventListener('mouseup', onUp, { once:false });
+  bindGlobalMouseupOnce(onUp)
   
   // ✅ Create ONE column per day, then fill it with row cells
   days.forEach((d, dayIdx) => {
@@ -1316,7 +1323,7 @@ window.getSchedulePayload = () => ({
 window.__signingOut = false;
 // --- signout ---
 async function doSignOut(source = 'manual') {
-  __signingOut = true;
+  window.__signingOut = true;
   console.log('[signout] start from:', source);
 
   try {
@@ -1341,7 +1348,7 @@ async function doSignOut(source = 'manual') {
     console.error('[signout] error', e);
     alert('Sign out failed: ' + (e?.message || e));
   } finally {
-    __signingOut = false;
+    window.__signingOut = false;
   }
 }
 
@@ -1406,7 +1413,6 @@ window.doSignOut = doSignOut; // ensure your button calls this exact one
 
 
     document.getElementById('acctSignOut')?.addEventListener('click', () => doSignOut('account-page'));
-    document.getElementById('miSignOut')?.addEventListener('click', () => doSignOut('topbar-menu'));
 
     // Toggle menu
     const btn = document.getElementById('acctBtn');
@@ -1470,14 +1476,13 @@ window.doSignOut = doSignOut; // ensure your button calls this exact one
     await renderTopbar();
   }
 
-  let __signingOut = false;
   let __authTick;
   const AUTH_DEBOUNCE = 50; // ms
   
   const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
     console.log('[auth:event]', event, session);
   
-    if (__signingOut) {
+    if (window.__signingOut) {
       console.log('[auth:event] skipped during manual sign-out');
       return;
     }
