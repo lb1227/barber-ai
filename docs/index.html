@@ -320,11 +320,97 @@
 .nav-item:hover{ background:#151a24; }
 .nav-item.active{ background:#1b2240; color:#fff; box-shadow:inset 0 0 0 1px #2e4aa3; }
 
+#authView{
+  position:fixed; inset:0; display:flex; align-items:center; justify-content:center;
+  background:rgba(10,12,18,.92); z-index:9999;
+}
+.auth-card{
+  width: min(420px, 92vw);
+  background: var(--panel);
+  border:1px solid #23273a;
+  border-radius: 14px;
+  padding: 20px;
+  box-shadow: 0 10px 30px rgba(0,0,0,.35);
+  text-align:center;
+}
+.auth-card h2{ margin: 0 0 12px; }
+.auth-row{
+  display:grid; gap:10px; grid-template-columns:1fr; margin-top:10px;
+}
+.auth-row input{
+  padding:10px 12px; border-radius:8px; border:1px solid #2c3147; background:#111420; color:var(--text);
+}
+.auth-actions{ display:flex; gap:10px; justify-content:center; margin-top:12px; }
+
+  /* === Sticky topbar === */
+.topbar{
+  position: sticky; top: 0; z-index: 20;
+  display: flex; align-items: center; justify-content: space-between;
+  gap: 12px; padding: 10px 16px;
+  background: #111626; border-bottom: 1px solid #1d2234;
+}
+
+.topbar .brand{ display:flex; align-items:center; gap:10px; color:var(--text); }
+.topbar .brand .logo{ font-size:18px; }
+.topbar .brand .name{ font-weight:800; letter-spacing:.2px; }
+
+.topbar .account{ display:flex; align-items:center; gap:8px; }
+
+.btn.small{
+  padding:8px 10px; border-radius:8px; font-weight:600; border:none; cursor:pointer;
+  background:var(--accent); color:#fff;
+}
+.btn.small.secondary{ background:#28304a; color:#d6dcf0; }
+
+/* Avatar & menu */
+.avatar-btn{
+  display:flex; align-items:center; gap:8px;
+  padding:6px 10px; border-radius:999px; border:1px solid #27304a;
+  background:#101425; color:#dbe4ff; cursor:pointer;
+}
+.avatar-circle{
+  width:28px; height:28px; border-radius:50%;
+  display:grid; place-items:center; font-weight:800;
+  background:#1d2746; color:#bcd0ff;
+}
+.avatar-name{ font-weight:700; font-size:13px; }
+
+.menu{
+  position:absolute; right:16px; top:52px; min-width:200px;
+  background:var(--panel); border:1px solid #23273a; border-radius:10px;
+  box-shadow:0 10px 30px rgba(0,0,0,.35); padding:8px; display:none; z-index:30;
+}
+.menu.open{ display:block; }
+.menu .mi{
+  width:100%; text-align:left; padding:8px 10px; border-radius:8px;
+  background:transparent; color:#d6dcf0; border:none; cursor:pointer;
+}
+.menu .mi:hover{ background:#151a24; }
+
+
+
 /* The top header you already have should stick as before when inside .app-content */
 </style>
 </head>
 <body>
 
+  <!-- Auth screen (hidden when logged in) -->
+  <div id="authView" style="display:none">
+    <div class="auth-card">
+      <h2>Sign in to Barber AI</h2>
+      <div class="auth-row">
+        <input id="authEmail" type="email" placeholder="you@example.com" autocomplete="email"/>
+        <input id="authPassword" type="password" placeholder="Password" autocomplete="current-password"/>
+      </div>
+      <div class="auth-actions">
+        <button id="btnSignIn">Sign In</button>
+        <button id="btnSignUp" class="secondary">Create Account</button>
+        <button id="btnGuest" class="secondary">Continue as Guest</button>
+      </div>
+      <p class="hint" id="authMsg"></p>
+    </div>
+  </div>
+  
   <div class="app">
   <aside class="sidebar">
     <nav class="nav">
@@ -335,7 +421,21 @@
     </nav>
   </aside>
 
-  <div class="app-content">
+<div class="app-content">
+  
+<!-- Top site header (sticky) -->
+<div class="topbar">
+  <div class="brand">
+    <span class="logo">💈</span>
+    <span class="name">Barber AI</span>
+  </div>
+
+  <div class="account" id="topbarAccount">
+    <!-- Filled by renderTopbar() -->
+    <button class="btn small" id="tbSignIn">Sign In</button>
+    <button class="btn small secondary" id="tbSignUp">Sign Up</button>
+  </div>
+</div>
 
 <main>
   <section class="view" data-view="scheduling">
@@ -969,6 +1069,86 @@ window.getSchedulePayload = () => ({
 });
 ------------------------------------------------------ */
 </script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js"></script>
+<script>
+  const SUPABASE_URL = "https://rfodbzbekelwmvjsntda.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJmb2RiemJla2Vsd212anNudGRhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTkxMDk2OTQsImV4cCI6MjA3NDY4NTY5NH0.yggTGamGf69NeToTDDvjHRycXbLERfkaFowK-Q1a6-s";
+
+  const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+</script>
+
+<script>
+  const appRoot   = document.querySelector('.app');
+  const authView  = document.getElementById('authView');
+  const authEmail = document.getElementById('authEmail');
+  const authPass  = document.getElementById('authPassword');
+  const btnIn     = document.getElementById('btnSignIn');
+  const btnUp     = document.getElementById('btnSignUp');
+  const authMsg   = document.getElementById('authMsg');
+  const btnGuest  = document.getElementById('btnGuest');
+
+  function setAuthScreen(visible){
+    if (!appRoot || !authView) return;
+    authView.style.display = visible ? 'flex' : 'none';
+    appRoot.style.filter   = visible ? 'blur(4px)' : 'none';
+    appRoot.style.pointerEvents = visible ? 'none' : 'auto';
+  }
+
+  async function refreshAuthUI(){
+    // If user chose guest mode, don’t show the auth overlay.
+    if (localStorage.getItem('barber_guest_mode') === 'true') {
+      setAuthScreen(false);
+      return;
+    }
+    const { data: { session } } = await supabase.auth.getSession();
+    setAuthScreen(!session);
+  }
+
+  btnIn?.addEventListener('click', async ()=>{
+    authMsg.textContent = '';
+    const email = (authEmail?.value || '').trim();
+    const password = authPass?.value || '';
+    if (!email || !password){ authMsg.textContent = 'Enter email and password.'; return; }
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error){ authMsg.textContent = error.message; return; }
+    await refreshAuthUI();
+  });
+
+  btnUp?.addEventListener('click', async ()=>{
+    authMsg.textContent = '';
+    const email = (authEmail?.value || '').trim();
+    const password = authPass?.value || '';
+    if (!email || !password){ authMsg.textContent = 'Enter email and password.'; return; }
+    const { error } = await supabase.auth.signUp({ email, password });
+    if (error){ authMsg.textContent = error.message; return; }
+    authMsg.textContent = 'Account created. You are now signed in.';
+    await refreshAuthUI();
+  });
+
+  btnGuest?.addEventListener('click', ()=>{
+    localStorage.setItem('barber_guest_mode', 'true'); // flag guest mode
+    setAuthScreen(false);                               // hide auth modal
+  });
+
+  // React to sign-in/out in other tabs too
+  supabase.auth.onAuthStateChange((_event, _session) => {
+    refreshAuthUI();
+  });
+
+  // Add a Sign Out button somewhere you want (e.g., sidebar). If you have no button yet, you can later add:
+  // <button id="btnSignOut" class="secondary">Sign Out</button>
+  document.getElementById('btnSignOut')?.addEventListener('click', async ()=>{
+    await supabase.auth.signOut();
+    await refreshAuthUI();
+  });
+
+
+  
+  // Kick off
+  refreshAuthUI();
+</script>
+
+
     </div> <!-- /.app-content -->
 </div>   <!-- /.app -->
 </body>
