@@ -1429,15 +1429,26 @@ window.getSchedulePayload = () => ({
   }
 
   supabase.auth.onAuthStateChange(async (_event, _session) => {
-    await refreshAuthUI();
-    await hydrateFromCloudAndRepaint();
+    try {
+      await refreshAuthUI();                 // re-render topbar/modal
+      const { data: { session } } = await supabase.auth.getSession();
+      if (session) {
+        await hydrateFromCloudAndRepaint();  // only when logged in
+      }
+    } catch (e) {
+      console.warn('[auth] onAuthStateChange handler error', e);
+    }
   });
 
-  //kickoff
+//kickoff
 (async () => {
   await refreshAuthUI();
-  await hydrateFromCloudAndRepaint();
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session) {
+    await hydrateFromCloudAndRepaint();
+  }
 })();
+
 </script>
 
 
