@@ -769,7 +769,9 @@ async function refreshAuthUI(){
       sessionUser: session?.user?.email || null
     });
 
-    setAuthScreen(shouldShow);
+    if (shouldShow) {
+      setTimeout(() => setAuthScreen(true), 0);
+    }
     await renderTopbar();
   }catch(e){
     console.error('[auth] refreshAuthUI crashed:', e);
