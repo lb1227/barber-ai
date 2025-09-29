@@ -653,26 +653,25 @@ function msg(text){ if (authMsg) authMsg.textContent = text || ''; }
 
 /* ========= SHOW/HIDE AUTH ========= */
 function setAuthScreen(visible){
-  const appRoot = document.querySelector('.app');
-  const authView = document.getElementById('authView');
-  if (!appRoot || !authView){
-    console.error('[auth] setAuthScreen: missing nodes', {appRoot: !!appRoot, authView: !!authView});
-    return;
+  const app = document.querySelector('.app');
+  const modal = document.getElementById('authView');
+  if (!app || !modal) return;
+
+  console.debug('[auth] setAuthScreen ->', visible);
+  if (visible) {
+    modal.style.setProperty('display','flex','important');
+    modal.style.setProperty('z-index','9999','important');
+    modal.style.setProperty('position','fixed','important');
+    modal.style.setProperty('inset','0','important');
+    app.style.setProperty('filter','blur(4px)','important');
+    app.style.setProperty('pointer-events','none','important');
+  } else {
+    modal.style.setProperty('display','none','important');
+    app.style.setProperty('filter','none','important');
+    app.style.setProperty('pointer-events','auto','important');
   }
-  console.debug('[auth] setAuthScreen ->', visible, {
-    before: getComputedStyle(authView).display,
-    inlineBefore: authView.style.display
-  });
-
-  authView.style.display   = visible ? 'flex' : 'none';
-  appRoot.style.filter     = visible ? 'blur(4px)' : 'none';
-  appRoot.style.pointerEvents = visible ? 'none' : 'auto';
-
-  console.debug('[auth] setAuthScreen applied', {
-    after: getComputedStyle(authView).display,
-    inlineAfter: authView.style.display
-  });
 }
+
 
 /* ========= TOPBAR ========= */
 async function renderTopbar(){
@@ -778,23 +777,21 @@ async function refreshAuthUI(){
 
   setAuthScreen(shouldShow);
 
-  // Belt & suspenders: if something flipped it back, re-assert.
   setTimeout(() => {
     const modal = document.getElementById('authView');
     const app   = document.querySelector('.app');
     if (!modal || !app) return;
-    const visible = getComputedStyle(modal).display !== 'none';
-    if (shouldShow && !visible) {
-      console.debug('[auth] fallback forcing modal visible');
-      modal.style.display = 'flex';
-      app.style.filter = 'blur(4px)';
-      app.style.pointerEvents = 'none';
-    }
-    if (!shouldShow && visible) {
-      // keep symmetry, ensure it hides when it should
-      modal.style.display = 'none';
-      app.style.filter = 'none';
-      app.style.pointerEvents = 'auto';
+
+    const cs = getComputedStyle(modal).display;
+    console.debug('[auth] post-setAuthScreen computed display =', cs, { shouldShow });
+
+    // If it *still* isn't visible, hard-force again.
+    if (shouldShow && cs === 'none') {
+      console.debug('[auth] forcing modal visible (fallback)');
+      modal.style.setProperty('display','flex','important');
+      app.style.setProperty('filter','blur(4px)','important');
+      app.style.setProperty('pointer-events','none','important');
+      console.debug('[auth] after-force display =', getComputedStyle(modal).display);
     }
   }, 0);
 
