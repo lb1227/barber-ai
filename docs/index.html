@@ -1330,9 +1330,9 @@ async function doSignOut(source = 'manual') {
     await renderTopbar();     // <<< this was the missing piece for you
 
     // 4) (Optional) deep clean ONLY if you see a stuck session
-    // Object.keys(localStorage)
-    //   .filter(k => k.startsWith('sb-') || k.includes('supabase'))
-    //   .forEach(k => localStorage.removeItem(k));
+    Object.keys(localStorage)
+    .filter(k => k.startsWith('sb-') || k.includes('supabase'))
+    .forEach(k => localStorage.removeItem(k));
 
     // 5) Sanity log
     const { data: { session } } = await supabase.auth.getSession();
