@@ -1237,13 +1237,24 @@ window.getSchedulePayload = () => ({
     const email = (authEmail?.value || '').trim();
     const password = authPass?.value || '';
     if (!email || !password){ authMsg.textContent = 'Enter email and password.'; return; }
-    const { error } = await supabase.auth.signInWithPassword({ email, password });
-    if (error){ authMsg.textContent = error.message; return; }
-    localStorage.removeItem('barber_guest_mode');   // <— important
-    await refreshAuthUI();
-    await loadCloudState();   // <— this pulls their saved schedule
-    renderWeek();
-    renderMonth();
+  
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      console.log('[signIn] data:', data, 'error:', error);
+      if (error) { authMsg.textContent = error.message; return; }
+      if (!data?.session) { 
+        // Usually only happens if email isn’t confirmed yet or settings changed
+        authMsg.textContent = 'Signed in, but no session returned. Check email verification settings.';
+        return;
+      }
+      localStorage.removeItem('barber_guest_mode');
+      await refreshAuthUI();
+      await loadCloudState();
+      renderWeek(); renderMonth();
+    } catch (e) {
+      console.error('[signIn] exception', e);
+      authMsg.textContent = 'Sign in failed. See console for details.';
+    }
   });
   
   btnUp?.addEventListener('click', async () => {
@@ -1251,14 +1262,28 @@ window.getSchedulePayload = () => ({
     const email = (authEmail?.value || '').trim();
     const password = authPass?.value || '';
     if (!email || !password){ authMsg.textContent = 'Enter email and password.'; return; }
-    const { error } = await supabase.auth.signUp({ email, password });
-    if (error){ authMsg.textContent = error.message; return; }
-    localStorage.removeItem('barber_guest_mode');   // <— important
-    authMsg.textContent = 'Account created. You are now signed in.';
-    await refreshAuthUI();
-    await loadCloudState();   // <— this pulls their saved schedule
-    renderWeek();
-    renderMonth();
+  
+    try {
+      const { data, error } = await supabase.auth.signUp({ email, password });
+      console.log('[signUp] data:', data, 'error:', error);
+      if (error) { authMsg.textContent = error.message; return; }
+  
+      // If email confirmations are ON (default), no session yet:
+      if (!data?.session) {
+        authMsg.textContent = 'Check your email to confirm your account, then come back to sign in.';
+        return;
+      }
+  
+      // If confirmations are OFF (or magic link flow), you get a session:
+      localStorage.removeItem('barber_guest_mode');
+      authMsg.textContent = 'Account created. You are now signed in.';
+      await refreshAuthUI();
+      await loadCloudState();
+      renderWeek(); renderMonth();
+    } catch (e) {
+      console.error('[signUp] exception', e);
+      authMsg.textContent = 'Sign up failed. See console for details.';
+    }
   });
 
 
