@@ -44,6 +44,24 @@ process.on("uncaughtException", (err) => console.error("[Uncaught]", err));
 process.on("unhandledRejection", (err) => console.error("[Unhandled]", err));
 
 // ---------- SUPABSE HELPERS ----------
+
+async function findUserIdByNumber(e164) {
+  const { data, error } = await supaAdmin
+    .from("numbers")
+    .select("user_id")
+    .eq("phone_number", e164)
+    .maybeSingle();
+  if (error) { console.warn("[numbers] lookup error", error); }
+  return data?.user_id || null;
+}
+async function readForm(req) {
+  return await new Promise((resolve, reject) => {
+    let body = "";
+    req.on("data", c => body += c);
+    req.on("end", () => resolve(new URLSearchParams(body)));
+    req.on("error", reject);
+  });
+}
 function getBearer(req) {
   const h = req.headers["authorization"] || "";
   return h.startsWith("Bearer ") ? h.slice(7) : null;
@@ -96,20 +114,38 @@ const server = http.createServer(async (req, res) => {
 
     // === Twilio voice ===
     if (path === "/voice") {
-      // Reverted: stream only; we start recording via REST when the media stream starts
-      const twiml = `
-        <Response>
-          <Start>
-            <Record recordingTrack="both"/>
-          </Start>
-          <Connect>
-            <Stream url="${BASE_URL.replace(/^https?/, "wss")}/media" track="inbound_track"/>
-          </Connect>
-        </Response>
-      `.trim();
-      
-      res.writeHead(200, { "Content-Type": "text/xml" });
-      return res.end(twiml);
+      if (req.method === "POST") {
+        const form = await readForm(req);
+        const toNumber = form.get("To");   // e.g. +15551234567
+        const callSid  = form.get("CallSid"); // optional for logs
+    
+        let userId = null;
+        if (toNumber) userId = await findUserIdByNumber(toNumber);
+    
+        const paramXml = userId
+          ? `<Parameter name="user_id" value="${userId}"/>`
+          : ""; // fallback to global defaults if not mapped
+    
+        const twiml = `
+          <Response>
+            <Start>
+              <Record recordingTrack="both"/>
+            </Start>
+            <Connect>
+              <Stream url="${BASE_URL.replace(/^https?/, "wss")}/media" track="inbound_track">
+                ${paramXml}
+              </Stream>
+            </Connect>
+          </Response>
+        `.trim();
+    
+        res.writeHead(200, { "Content-Type": "text/xml" });
+        return res.end(twiml);
+      }
+    
+      // optional GET
+      res.writeHead(200, { "Content-Type": "text/plain" });
+      return res.end("POST Twilio here");
     }
 
     if (path === "/config") {
@@ -1103,26 +1139,49 @@ wss.on("connection", (twilioWS) => {
     if (msg.event === "start") {
       streamSid = msg.start.streamSid;
       twilioReady = true;
-      console.log("[Twilio] stream started", streamSid, "tracks:", msg.start.tracks);
-
-      // NEW: start Twilio recording via REST (dual channels, both tracks)
-      const callSid = msg.start?.callSid;
-      startTwilioRecording(callSid).catch(console.error);
-
-      resetUserCapture();
-
-      // Greeting (AI speaks)
-      greetingInFlight = true; // use the global so guards stay off during greeting
+    
+      const custom = msg.start?.customParameters || {};
+      const userId = custom.user_id || null;
+    
+      // Load per-account config
+      let userCfg = null;
+      if (userId) {
+        try { userCfg = await getConfigForUser(userId); } catch (e) { console.warn(e); }
+      }
+      // Fallback defaults if mapping missing
+      userCfg ??= {
+        name: "Barber AI Receptionist",
+        greeting: "Hello, thank you for calling the barbershop! How can I help you today.",
+        voice: "verse",
+        rate: 1.0, barge_in: true, end_silence_ms: 1000, timezone: "America/New_York"
+      };
+    
+      // Apply per-account voice/settings to the OpenAI session
+      safeSendOpenAI({
+        type: "session.update",
+        session: {
+          modalities: ["text","audio"],
+          voice: userCfg.voice || "verse",
+          output_audio_format: "g711_ulaw",
+          input_audio_format:  "g711_ulaw",
+          tools: /* keep your tools */,
+          tool_choice: "auto",
+          instructions: INSTRUCTIONS
+        }
+      });
+    
+      // Start greeting using the account’s custom greeting
+      greetingInFlight = true;
       safeSendOpenAI({
         type: "response.create",
         response: {
           modalities: ["audio", "text"],
           conversation: "auto",
-          instructions:
-            "Say exactly: 'Thank you for calling Mobile Pet Grooming, How can I help you today?'"
-        },
+          instructions: userCfg.greeting || "Thank you for calling…"
+        }
       });
-      awaitingResponse = true;
+    
+      // (start recording etc…)
       return;
     }
 
