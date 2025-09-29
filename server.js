@@ -3,9 +3,6 @@ import http from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { getAuthUrl, handleOAuthCallback, whoAmI, listEventsToday, createEvent, listEventsOn } from "./gcal.js";
 import { URL } from "url";
-//SUPABASE
-import { createClient as createSupabaseClient } from "@supabase/supabase-js";
-import { z } from "zod";
 
 const ALLOW_ORIGIN = process.env.GUI_ORIGIN || "*"; // e.g. https://<user>.github.io
 
@@ -31,16 +28,6 @@ const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN;
 
-//SUPABASE ENVS
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
-  console.error("Missing SUPABASE_URL or SUPABASE_SERVICE_ROLE");
-  process.exit(1);
-}
-const supaAdmin = createSupabaseClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
-
-
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY env var");
   console.error("Missing OPENAI_API_KEY env var");
@@ -51,96 +38,13 @@ if (!OPENAI_API_KEY) {
 process.on("uncaughtException", (err) => console.error("[Uncaught]", err));
 process.on("unhandledRejection", (err) => console.error("[Unhandled]", err));
 
-
-// ---- parse bearer from Authorization ----
-function getBearer(req) {
-  const h = req.headers["authorization"] || "";
-  if (h.startsWith("Bearer ")) return h.slice(7);
-  return null;
-}
-
-// ---- verify Supabase JWT using admin client ----
-async function requireUser(req, res) {
-  try {
-    const token = getBearer(req);
-    if (!token) return null;
-    const { data, error } = await supaAdmin.auth.getUser(token);
-    if (error || !data?.user) return null;
-    return data.user; // { id, email, ... }
-  } catch {
-    return null;
-  }
-}
-
-// ---- read JSON body safely ----
-async function readJson(req) {
-  return await new Promise((resolve, reject) => {
-    let buf = "";
-    req.on("data", (c) => (buf += c));
-    req.on("end", () => {
-      try {
-        resolve(buf ? JSON.parse(buf) : {});
-      } catch (e) {
-        reject(e);
-      }
-    });
-    req.on("error", reject);
-  });
-}
-
-// ---- Zod schema (validates user updates) ----
-const receptionistConfigSchema = z.object({
-  name: z.string().min(1).max(100),
-  greeting: z.string().min(1).max(500),
-  voice: z.string().min(1).max(40),
-  rate: z.number().min(0.5).max(2.0),
-  barge_in: z.boolean(),
-  end_silence_ms: z.number().min(200).max(5000),
-  timezone: z.string().min(1).max(100),
-  phone: z.string().max(40).optional().default(""),
-});
-
-// ---- DB I/O (service key bypasses RLS) ----
-async function getConfigForUser(userId) {
-  const { data, error } = await supaAdmin
-    .from("receptionist_config")
-    .select("*")
-    .eq("user_id", userId)
-    .maybeSingle();
-  if (error) throw error;
-  return (
-    data ?? {
-      user_id: userId,
-      name: "Barber AI Receptionist",
-      greeting:
-        "Hello, thank you for calling the barbershop! How can I help you today.",
-      voice: "alloy",
-      rate: 1.0,
-      barge_in: true,
-      end_silence_ms: 1000,
-      timezone: "America/New_York",
-      phone: "",
-    }
-  );
-}
-
-async function upsertConfigForUser(userId, cfg) {
-  const payload = { user_id: userId, ...cfg };
-  const { error } = await supaAdmin
-    .from("receptionist_config")
-    .upsert(payload)
-    .select("user_id");
-  if (error) throw error;
-}
-
-
 // ---------- HTTP server (TwiML + health) ----------
 const server = http.createServer(async (req, res) => {
   try {
     // CORS for all routes
     res.setHeader("Access-Control-Allow-Origin", ALLOW_ORIGIN);
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
     if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
@@ -233,47 +137,6 @@ const server = http.createServer(async (req, res) => {
       return res.end(JSON.stringify(event, null, 2));
     }
 
-    // === Auth'ed config API ===
-    if (path === "/api/me/config" && req.method === "GET") {
-      const user = await requireUser(req, res);
-      if (!user) {
-        res.writeHead(401, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ error: "unauthorized" }));
-      }
-      try {
-        const cfg = await getConfigForUser(user.id);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify(cfg));
-      } catch (e) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ error: "read_failed" }));
-      }
-    }
-    
-    if (path === "/api/me/config" && req.method === "PUT") {
-      const user = await requireUser(req, res);
-      if (!user) {
-        res.writeHead(401, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ error: "unauthorized" }));
-      }
-      try {
-        const body = await readJson(req);
-        const parsed = receptionistConfigSchema.safeParse(body);
-        if (!parsed.success) {
-          res.writeHead(400, { "Content-Type": "application/json" });
-          return res.end(
-            JSON.stringify({ error: "invalid", details: parsed.error.flatten() })
-          );
-        }
-        await upsertConfigForUser(user.id, parsed.data);
-        res.writeHead(200, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ ok: true }));
-      } catch (e) {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        return res.end(JSON.stringify({ error: "write_failed" }));
-      }
-    }
-    
     // === Default health check ===
     res.writeHead(200, { "Content-Type": "text/plain" });
     res.end("Barber AI Realtime bridge is alive.\n");
@@ -837,7 +700,7 @@ wss.on("connection", (twilioWS) => {
       },
     });
 
-    while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
+  while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
   });
 
   openaiWS.on("message", async (data) => {
@@ -923,6 +786,9 @@ wss.on("connection", (twilioWS) => {
               sawQuestionStart = false;
               singleQuestionCutApplied = true;
               questionCutTimer = null;
+
+              // NEW: immediately follow with a clean, single question
+              reAskSingleQuestion();
             }, 120);
           }
         }
@@ -937,6 +803,9 @@ wss.on("connection", (twilioWS) => {
             sawQuestionStart = false;
             singleQuestionCutApplied = true;
             questionCutTimer = null;
+
+            // NEW: immediately follow with a clean, single question
+            reAskSingleQuestion();
           }, 120);
         }
 
@@ -950,6 +819,9 @@ wss.on("connection", (twilioWS) => {
             sawQuestionStart = false;
             singleQuestionCutApplied = true;
             questionCutTimer = null;
+
+            // NEW (recommended): re-ask to ensure the question is delivered cleanly
+            reAskSingleQuestion();
           }, 400);
         }
       }
