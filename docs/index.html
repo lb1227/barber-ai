@@ -1305,13 +1305,27 @@ if (rcpReset) {
   renderMonth();
 });
 
-document.getElementById('advSave')?.addEventListener('click', async () => {
+const advSave = document.getElementById('advSave');
+advSave?.addEventListener('click', async () => {
   saveReceptionistFromForm();
+
   const { data: { session } } = await supabase.auth.getSession();
   if (session) {
     const res = await upsertReceptionistConfig();
     if (!res.ok) console.warn('[cloud] upsert receptionist_config failed', res.error);
   }
+
+  // ✅ Animate button feedback just like Edit Receptionist
+  advSave.disabled = true; // prevents double clicks during feedback
+  const oldLabel = advSave.textContent;
+  advSave.textContent = "Saved ✅";
+  advSave.style.background = "#5dd29b"; // temporary green flash
+
+  setTimeout(() => {
+    advSave.textContent = oldLabel;
+    advSave.style.background = ""; // reset to normal CSS
+    advSave.disabled = false;
+  }, 900);
 });
 
 document.getElementById('advReset')?.addEventListener('click', () => {
