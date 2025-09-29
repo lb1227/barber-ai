@@ -202,6 +202,24 @@ function rmsOfMuLawBase64(b64) {
   }
 }
 
+// === ZCR helper (speech-likeness) — NEW ===
+function zcrOfMuLawBase64(b64) {
+  try {
+    const buf = Buffer.from(b64, "base64");
+    if (!buf.length) return 0;
+    let prev = muLawByteToPcm16(buf[0]);
+    let crossings = 0;
+    for (let i = 1; i < buf.length; i++) {
+      const cur = muLawByteToPcm16(buf[i]);
+      if ((prev > 400 && cur < -400) || (prev < -400 && cur > 400)) crossings++;
+      prev = cur;
+    }
+    return crossings / buf.length;
+  } catch {
+    return 0;
+  }
+}
+
 // ---------- Conversation policies (tunable) ----------
 const VAD = {
   FRAME_MS: 20,          // Twilio sends ~20ms frames
@@ -209,16 +227,21 @@ const VAD = {
   RMS_CONTINUE: 0.040,
   MIN_SPEECH_MS: 260,    // was 320 (slightly quicker)
   END_SILENCE_MS: 900,   // was 1200 (commit sooner)
-  BARGE_IN_MIN_MS: 220,  // require ~0.22s of speech to cancel assistant
+  BARGE_IN_MIN_MS: 340,  // was 220 → need ~0.34s to interrupt
   MAX_TURN_DURATION_MS: 6000,
 };
 const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
 
 // === Word-likeness gating (for barge-in only) — NEW ===
 const WL_WINDOW_MS = 900;               // look-back window for syllable-like peaks
-const MIN_WL_PEAKS_FOR_BARGE = 2;       // need ≥2 peaks in window to count as words
+const MIN_WL_PEAKS_FOR_BARGE = 3;       // was 2 → need ≥3 peaks in window
 const WL_HIGH_MARGIN = 0.02;            // how far above continue threshold to count a “peak”
-const POST_BOT_TURN_COOLDOWN_MS = 600;  // short echo guard after bot finishes
+const POST_BOT_TURN_COOLDOWN_MS = 900;  // short echo guard after bot finishes
+
+// === ZCR gating (speech-likeness) — NEW ===
+const ZCR_WINDOW_FRAMES = 12;         // ~240ms at 20ms/frame
+const ZCR_MIN_FOR_SPEECH = 0.03;      // speech-like lower bound
+const ZCR_MAX_FOR_SPEECH = 0.18;      // speech-like upper bound
 
 // === NEW: enforce exact greeting + brief pause before listening ===
 const EXPECTED_GREETING = "thank you for calling mobile pet grooming, how can i help you today?";
@@ -240,25 +263,13 @@ const INSTRUCTIONS =
     "",
     "# Single-question policy (STRICT)",
     "- Ask for **exactly one** piece of information per turn.",
-    "- Allowed pairs (and only these): **date + time** (when picking a slot) and **phone + address** (final step to confirm booking).",
+    "- The **only allowed pair** is: **“What day and time work best for your appointment?”**",
     "- Never combine other fields in one sentence (e.g., **no** “name and phone”, **no** “service and date”).",
-    "- Never join requests with “and” unless it’s one of the two allowed pairs.",
+    "- Never join requests with “and”; ask one thing only.",
     "- If you start a second request, **stop** and wait for the caller.",
-    "- Collect in this order: **name → service → species → weight → date & time → phone + address**.",
-    "- After each answer, acknowledge briefly and ask the next single question. End your turn with a single question mark.",
-    "",
-    "# FLOW: When caller asks to book:",
-    "1) Ask: \"Awesome I can go ahead and help you with that, can I start by getting your name for the booking?\"",
-    "2) After name: Ask: \"Alright <name>, what kind of service were you looking to book today? A full grooming or just a bath?\"",
-    "3) After service: Ask: \"Perfect, will we be grooming a dog or a cat today?\"",
-    "4) After species: Ask: \"Sounds good, and do you know the approximate weight of your dog/cat?\"",
-    "5) After weight: Ask: \"Got it! And what date and time works best for you?\"",
-    "6) After date/time: Call list_appointments for that date. If the requested time is free, say:",
-    "   \"Okay, there is availability <date> at <time>. In order to get you booked, can I get your phone number and address?\"",
-    "   If not free, offer two nearest alternatives and ask which works.",
-    "7) After phone and address (together): Call book_appointment. Put species, weight, and address in the notes.",
-    "8) After booking: Say: \"Alright <name>, I have you booked for <time> <date>. Is there anything else I can help you with?\"",
-    "Rules: One question per turn EXCEPT steps 5 (date + time) and 7 (phone + address).",
+    "- Collect in this order: **name → service → phone → date & time**.",
+    "- After each answer, acknowledge briefly and ask the next single question.",
+    "- End your turn immediately after asking the question, and **always end with a question mark**.",
   ].join("\n");
 
 // ---------- Start Twilio recording via REST (dual channels, both tracks) ----------
@@ -377,6 +388,9 @@ wss.on("connection", (twilioWS) => {
   let wlPeakTimes = [];
   let postBotUntilTs = 0;
 
+  // NEW: ZCR window for speech-likeness
+  let zcrWindow = [];
+
   function resetUserCapture() {
     userSpeechActive = false;
     userSpeechMs = 0;
@@ -391,6 +405,9 @@ wss.on("connection", (twilioWS) => {
     // NEW: reset word-likeness
     wlAbove = false;
     wlPeakTimes = [];
+
+    // NEW: reset ZCR window
+    zcrWindow = [];
   }
 
   // === Word-likeness helpers (syllable-like peaks) — NEW ===
@@ -410,14 +427,12 @@ wss.on("connection", (twilioWS) => {
     }
   }
 
-  // >>> UPDATED: allow phone+address pair
   function isDisallowedDoubleQuestion(text) {
     const s = (text || "").toLowerCase();
 
     const nameTokens    = ["name", "first name", "last name"];
     const serviceTokens = ["service", "groom", "grooming", "bath", "nail", "trim"];
     const phoneTokens   = ["phone", "phone number", "callback", "contact number"];
-    const addressTokens = ["address", "street", "st.", "ave", "avenue", "blvd", "road", "rd", "zip", "zip code", "zipcode", "city", "state"];
     const dateTokens    = ["date", "day", "today", "tomorrow", "monday","tuesday","wednesday","thursday","friday","saturday","sunday"];
     const timeTokens    = ["time", "am", "pm", "morning", "afternoon", "evening"];
 
@@ -426,15 +441,10 @@ wss.on("connection", (twilioWS) => {
     if (hasAny(nameTokens))    cats.add("name");
     if (hasAny(serviceTokens)) cats.add("service");
     if (hasAny(phoneTokens))   cats.add("phone");
-    if (hasAny(addressTokens)) cats.add("address");
     if (hasAny(dateTokens))    cats.add("date");
     if (hasAny(timeTokens))    cats.add("time");
 
-    // Allowed pairs:
-    if (cats.size === 2 && cats.has("date") && cats.has("time")) return false;     // date + time
-    if (cats.size === 2 && cats.has("phone") && cats.has("address")) return false; // phone + address
-
-    // Everything else that mixes ≥2 categories is disallowed
+    if (cats.size === 2 && cats.has("date") && cats.has("time")) return false;
     return cats.size >= 2;
   }
 
@@ -464,8 +474,16 @@ wss.on("connection", (twilioWS) => {
       // Word-likeness tracking (syllable-like peaks)
       updateWordlike(level, VAD.RMS_START, VAD.RMS_CONTINUE);
 
-      // Use a slightly higher threshold to start counting barge-in time
-      const bargeThresh = VAD.RMS_START + 0.02;
+      // NEW: compute ZCR for this frame and keep a small moving window
+      const zcr = zcrOfMuLawBase64(b64);
+      zcrWindow.push(zcr);
+      if (zcrWindow.length > ZCR_WINDOW_FRAMES) zcrWindow.shift();
+      const avgZcr = zcrWindow.length
+        ? zcrWindow.reduce((a, b) => a + b, 0) / zcrWindow.length
+        : 0;
+
+      // Use a higher energy threshold to even start counting barge-in time
+      const bargeThresh = Math.max(VAD.RMS_START + 0.03, 0.09); // was +0.02
       if (level >= bargeThresh) {
         bargeMs += VAD.FRAME_MS;
       } else {
@@ -473,8 +491,13 @@ wss.on("connection", (twilioWS) => {
       }
 
       const peaks = recentWordlikePeaks();
-      if (bargeMs >= VAD.BARGE_IN_MIN_MS && peaks >= MIN_WL_PEAKS_FOR_BARGE) {
-        // Only cancel if we heard sustained, word-like speech
+
+      // NEW: barge-in only if ALL conditions look like real speech
+      const speechLike =
+        avgZcr >= ZCR_MIN_FOR_SPEECH && avgZcr <= ZCR_MAX_FOR_SPEECH;
+
+      if (bargeMs >= VAD.BARGE_IN_MIN_MS && peaks >= MIN_WL_PEAKS_FOR_BARGE && speechLike) {
+        // Only cancel if we heard sustained, word-like, speech-like audio
         safeSendOpenAI({ type: "response.cancel" });
         isAssistantSpeaking = false;
         awaitingResponse = false;
@@ -777,7 +800,7 @@ wss.on("connection", (twilioWS) => {
           }
         }
 
-        // EARLY STOP: detect disallowed double-question (except allowed pairs).
+        // EARLY STOP: detect disallowed double-question (except date+time pair).
         // Defer ~120ms so audio doesn't clip.
         if (!questionCutTimer && isDisallowedDoubleQuestion(assistantUtterance)) {
           questionCutTimer = setTimeout(() => {
