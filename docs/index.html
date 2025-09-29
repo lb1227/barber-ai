@@ -1428,10 +1428,8 @@ window.getSchedulePayload = () => ({
     await renderTopbar();
   }
 
-  supabase.auth.onAuthStateChange((_event, _session) => {
-    // Only one call; refreshAuthUI() will render the topbar.
-    refreshAuthUI();
-    // when auth changes (login/logout), try to load cloud and repaint
+  supabase.auth.onAuthStateChange(async (_event, _session) => {
+    await refreshAuthUI();
     await hydrateFromCloudAndRepaint();
   });
 
