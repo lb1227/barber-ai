@@ -713,6 +713,21 @@ async function renderTopbar(){
     </div>
   `;
 
+  document.getElementById("tbSignIn")?.addEventListener("click", () => {
+    console.debug('[topbar] tbSignIn click');
+    setAuthScreen(true);
+  });
+  document.getElementById("tbSignUp")?.addEventListener("click", () => {
+    console.debug('[topbar] tbSignUp click');
+    setAuthScreen(true);
+  });
+  document.getElementById('miSignIn')?.addEventListener('click', ()=>{
+    console.debug('[menu] miSignIn click');
+    localStorage.removeItem('barber_guest_mode');
+    setAuthScreen(true);
+    closeMenu();
+  });
+
   const btn = document.getElementById('acctBtn');
   const menu = document.getElementById('acctMenu');
   function closeMenu() {
@@ -757,25 +772,27 @@ async function renderTopbar(){
 
 /* ========= CENTRAL AUTH REFRESH ========= */
 async function refreshAuthUI(){
-  try{
-    const { data: { session }, error } = await supabase.auth.getSession();
-    if (error) console.warn('[auth] getSession error:', error);
-    const hasSession = !!session;
-    const isGuest = localStorage.getItem('barber_guest_mode') === 'true';
-    const shouldShow = !hasSession && !isGuest;
+  const { data: { session }, error } = await supabase.auth.getSession();
+  const hasSession = !!session;
+  const isGuest = localStorage.getItem('barber_guest_mode') === 'true';
+  const shouldShow = !hasSession && !isGuest;
 
-    console.debug('[auth] refreshAuthUI', {
-      hasSession, isGuest, shouldShow,
-      sessionUser: session?.user?.email || null
-    });
+  setAuthScreen(shouldShow);
 
-    if (shouldShow) {
-      setTimeout(() => setAuthScreen(true), 0);
+  // fallback re-assert after the current tick
+  queueMicrotask(() => {
+    const modal = document.getElementById('authView');
+    const app = document.querySelector('.app');
+    if (!modal || !app) return;
+    if (shouldShow && getComputedStyle(modal).display === 'none') {
+      console.debug('[auth] fallback forcing modal visible');
+      modal.style.display = 'flex';
+      app.style.filter = 'blur(4px)';
+      app.style.pointerEvents = 'none';
     }
-    await renderTopbar();
-  }catch(e){
-    console.error('[auth] refreshAuthUI crashed:', e);
-  }
+  });
+
+  await renderTopbar();
 }
 
 /* ========= BUTTON HANDLERS ========= */
@@ -1377,6 +1394,15 @@ nextMon.addEventListener('click', ()=>{ state.monthCursor = new Date(state.month
 clearBlackouts.addEventListener('click', ()=>{
   state.blackoutDays = {};
   save(); renderMonth(); renderWeek();
+});
+  
+  document.addEventListener('click', (e) => {
+  const id = e.target && e.target.id;
+  if (id === 'tbSignIn' || id === 'tbSignUp' || id === 'miSignIn') {
+    e.preventDefault();
+    localStorage.removeItem('barber_guest_mode');
+    setAuthScreen(true);
+  }
 });
 
   if (rcpSave) {
