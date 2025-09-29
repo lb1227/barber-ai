@@ -4,6 +4,11 @@ import { WebSocketServer, WebSocket } from "ws";
 import { getAuthUrl, handleOAuthCallback, whoAmI, listEventsToday, createEvent, listEventsOn } from "./gcal.js";
 import { URL } from "url";
 
+//SUPABASE
+import { supaAdmin } from "./api/lib/supa.js";
+import { receptionistConfigSchema } from "./api/lib/schema.js";
+import { getConfigForUser, upsertConfigForUser } from "./api/lib/config.js";
+
 const ALLOW_ORIGIN = process.env.GUI_ORIGIN || "*"; // e.g. https://<user>.github.io
 
 function parseToolArgs(maybeJSON) {
@@ -38,13 +43,47 @@ if (!OPENAI_API_KEY) {
 process.on("uncaughtException", (err) => console.error("[Uncaught]", err));
 process.on("unhandledRejection", (err) => console.error("[Unhandled]", err));
 
+// ---------- SUPABSE HELPERS ----------
+function getBearer(req) {
+  const h = req.headers["authorization"] || "";
+  return h.startsWith("Bearer ") ? h.slice(7) : null;
+}
+
+async function requireUser(req) {
+  try {
+    const token = getBearer(req);
+    if (!token) return null;
+    const { data, error } = await supaAdmin.auth.getUser(token);
+    if (error || !data?.user) return null;
+    return data.user; // { id, email, ... }
+  } catch {
+    return null;
+  }
+}
+
+async function readJson(req) {
+  return await new Promise((resolve, reject) => {
+    let buf = "";
+    req.on("data", (c) => (buf += c));
+    req.on("end", () => {
+      try { resolve(buf ? JSON.parse(buf) : {}); } catch (e) { reject(e); }
+    });
+    req.on("error", reject);
+  });
+}
+
+function json(res, code, obj) {
+  res.writeHead(code, { "Content-Type": "application/json" });
+  res.end(JSON.stringify(obj));
+}
+
 // ---------- HTTP server (TwiML + health) ----------
 const server = http.createServer(async (req, res) => {
   try {
     // CORS for all routes
     res.setHeader("Access-Control-Allow-Origin", ALLOW_ORIGIN);
     res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-    res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
     if (req.method === "OPTIONS") {
       res.writeHead(204);
       res.end();
@@ -135,6 +174,36 @@ const server = http.createServer(async (req, res) => {
       console.log("[HTTP] /gcal/create OK id=", event.id);
       res.writeHead(200, { "Content-Type": "application/json" });
       return res.end(JSON.stringify(event, null, 2));
+    }
+
+    // === Auth'ed config API ===
+    if (path === "/api/me/config" && req.method === "GET") {
+      const user = await requireUser(req);
+      if (!user) return json(res, 401, { error: "unauthorized" });
+      try {
+        const cfg = await getConfigForUser(user.id);
+        return json(res, 200, cfg);
+      } catch (e) {
+        console.error("[/api/me/config GET]", e);
+        return json(res, 500, { error: "read_failed" });
+      }
+    }
+    
+    if (path === "/api/me/config" && req.method === "PUT") {
+      const user = await requireUser(req);
+      if (!user) return json(res, 401, { error: "unauthorized" });
+      try {
+        const body = await readJson(req);
+        const parsed = receptionistConfigSchema.safeParse(body);
+        if (!parsed.success) {
+          return json(res, 400, { error: "invalid", details: parsed.error.flatten() });
+        }
+        await upsertConfigForUser(user.id, parsed.data);
+        return json(res, 200, { ok: true });
+      } catch (e) {
+        console.error("[/api/me/config PUT]", e);
+        return json(res, 500, { error: "write_failed" });
+      }
     }
 
     // === Default health check ===
