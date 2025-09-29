@@ -772,25 +772,31 @@ async function renderTopbar(){
 
 /* ========= CENTRAL AUTH REFRESH ========= */
 async function refreshAuthUI(){
-  const { data: { session }, error } = await supabase.auth.getSession();
-  const hasSession = !!session;
+  const { data: { session } } = await supabase.auth.getSession();
   const isGuest = localStorage.getItem('barber_guest_mode') === 'true';
-  const shouldShow = !hasSession && !isGuest;
+  const shouldShow = !session && !isGuest;
 
   setAuthScreen(shouldShow);
 
-  // fallback re-assert after the current tick
-  queueMicrotask(() => {
+  // Belt & suspenders: if something flipped it back, re-assert.
+  setTimeout(() => {
     const modal = document.getElementById('authView');
-    const app = document.querySelector('.app');
+    const app   = document.querySelector('.app');
     if (!modal || !app) return;
-    if (shouldShow && getComputedStyle(modal).display === 'none') {
+    const visible = getComputedStyle(modal).display !== 'none';
+    if (shouldShow && !visible) {
       console.debug('[auth] fallback forcing modal visible');
       modal.style.display = 'flex';
       app.style.filter = 'blur(4px)';
       app.style.pointerEvents = 'none';
     }
-  });
+    if (!shouldShow && visible) {
+      // keep symmetry, ensure it hides when it should
+      modal.style.display = 'none';
+      app.style.filter = 'none';
+      app.style.pointerEvents = 'auto';
+    }
+  }, 0);
 
   await renderTopbar();
 }
@@ -1404,6 +1410,71 @@ clearBlackouts.addEventListener('click', ()=>{
     setAuthScreen(true);
   }
 });
+
+  document.addEventListener('click', async (e) => {
+  const t = e.target;
+  if (!t || !t.id) return;
+
+  // ---- AUTH MODAL BUTTONS (delegated) ----
+  if (t.id === 'btnGuest') {
+    console.debug('[auth] Guest clicked (delegated)');
+    localStorage.setItem('barber_guest_mode', 'true');
+    await refreshAuthUI();
+    const em = document.getElementById('authEmail');
+    const pw = document.getElementById('authPassword');
+    if (em) em.value = '';
+    if (pw) pw.value = '';
+    const m = document.getElementById('authMsg');
+    if (m) m.textContent = 'Browsing as guest.';
+    return;
+  }
+
+  if (t.id === 'btnSignIn') {
+    console.debug('[auth] Sign In clicked (delegated)');
+    const em = (document.getElementById('authEmail')?.value || '').trim();
+    const pw = (document.getElementById('authPassword')?.value || '');
+    const m  = document.getElementById('authMsg');
+    if (!em || !pw) { if (m) m.textContent = 'Enter email and password.'; return; }
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({ email: em, password: pw });
+      console.log('[signIn] data:', data, 'error:', error);
+      if (error) { if (m) m.textContent = error.message; return; }
+      if (!data?.session) { if (m) m.textContent = 'Signed in, but no session returned. Check email verification.'; return; }
+      localStorage.removeItem('barber_guest_mode');
+      await refreshAuthUI();
+      await (window.loadCloudState?.());
+      window.renderWeek?.(); window.renderMonth?.();
+    } catch (err) {
+      console.error('[signIn] exception', err);
+      if (m) m.textContent = 'Sign in failed. See console.';
+    }
+    return;
+  }
+
+  if (t.id === 'btnSignUp') {
+    console.debug('[auth] Sign Up clicked (delegated)');
+    const em = (document.getElementById('authEmail')?.value || '').trim();
+    const pw = (document.getElementById('authPassword')?.value || '');
+    const m  = document.getElementById('authMsg');
+    if (!em || !pw) { if (m) m.textContent = 'Enter email and password.'; return; }
+    try {
+      const { data, error } = await supabase.auth.signUp({ email: em, password: pw });
+      console.log('[signUp] data:', data, 'error:', error);
+      if (error) { if (m) m.textContent = error.message; return; }
+      if (!data?.session) { if (m) m.textContent = 'Check your email to confirm, then sign in.'; return; }
+      localStorage.removeItem('barber_guest_mode');
+      if (m) m.textContent = 'Account created. You are now signed in.';
+      await refreshAuthUI();
+      await (window.loadCloudState?.());
+      window.renderWeek?.(); window.renderMonth?.();
+    } catch (err) {
+      console.error('[signUp] exception', err);
+      if (m) m.textContent = 'Sign up failed. See console.';
+    }
+    return;
+  }
+});
+
 
   if (rcpSave) {
   rcpSave.addEventListener('click', ()=>{
