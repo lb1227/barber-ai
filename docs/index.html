@@ -620,256 +620,7 @@
   </div>
 </footer>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
-
 <script>
-/* ========= SUPABASE CLIENT ========= */
-const SUPABASE_URL = "https://rfodbzbekelwmvjsntda.supabase.co";
-const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJmb2RiemJla2Vsd212anNudGRhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTkxMDk2OTQsImV4cCI6MjA3NDY4NTY5NH0.yggTGamGf69NeToTDDvjHRycXbLERfkaFowK-Q1a6-s";
-
-console.debug('[debug] window.supabase exists:', !!window.supabase);
-console.debug('[debug] createClient exists:', !!window.supabase?.createClient);
-
-const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-window.addEventListener('error', e => {
-  console.error('[window.onerror]', e.message, e.error);
-});
-window.addEventListener('unhandledrejection', e => {
-  console.error('[unhandledrejection]', e.reason);
-});
-
-/* ========= DOM HOOKS ========= */
-const appRoot   = document.querySelector('.app');
-const authView  = document.getElementById('authView');
-const authEmail = document.getElementById('authEmail');
-const authPass  = document.getElementById('authPassword');
-const btnIn     = document.getElementById('btnSignIn');
-const btnUp     = document.getElementById('btnSignUp');
-const btnGuest  = document.getElementById('btnGuest');
-const authMsg   = document.getElementById('authMsg');
-
-function msg(text){ if (authMsg) authMsg.textContent = text || ''; }
-
-/* ========= SHOW/HIDE AUTH ========= */
-function setAuthScreen(visible){
-  const app = document.querySelector('.app');
-  const modal = document.getElementById('authView');
-  if (!app || !modal) return;
-
-  console.debug('[auth] setAuthScreen ->', visible);
-  if (visible) {
-    modal.style.setProperty('display','flex','important');
-    modal.style.setProperty('z-index','9999','important');
-    modal.style.setProperty('position','fixed','important');
-    modal.style.setProperty('inset','0','important');
-    app.style.setProperty('filter','blur(4px)','important');
-    app.style.setProperty('pointer-events','none','important');
-  } else {
-    modal.style.setProperty('display','none','important');
-    app.style.setProperty('filter','none','important');
-    app.style.setProperty('pointer-events','auto','important');
-  }
-}
-
-
-/* ========= TOPBAR ========= */
-async function renderTopbar(){
-  const wrap = document.getElementById("topbarAccount");
-  if (!wrap) return;
-
-  const { data: { session } } = await supabase.auth.getSession();
-  const user = session?.user || null;
-  const isGuest = !user && (localStorage.getItem('barber_guest_mode') === 'true');
-
-  if (!user && !isGuest){
-    wrap.innerHTML = `
-      <button class="btn small" id="tbSignIn">Sign In</button>
-      <button class="btn small secondary" id="tbSignUp">Sign Up</button>
-    `;
-    document.getElementById("tbSignIn")?.addEventListener("click", () => setAuthScreen(true));
-    document.getElementById("tbSignUp")?.addEventListener("click", () => setAuthScreen(true));
-    return;
-  }
-
-  const displayName = isGuest ? "Guest" : (user?.user_metadata?.full_name || user?.email || "User");
-  const initials = (isGuest ? "G" : (user?.email || displayName || "?"))
-    .split("@")[0].replace(/[^a-z0-9]+/gi," ").trim().split(" ").map(s=>s[0]).join("").slice(0,2).toUpperCase() || "U";
-
-  wrap.innerHTML = `
-    <button class="avatar-btn" id="acctBtn" aria-haspopup="menu" aria-expanded="false">
-      <span class="avatar-circle">${initials}</span>
-      <span class="avatar-name">${displayName}</span>
-    </button>
-    <div class="menu" id="acctMenu" role="menu">
-      ${isGuest ? `
-        <div style="padding:6px 10px; color:#8a93a6;">Browsing as guest</div>
-        <button class="mi" id="miSignIn" role="menuitem">Sign In</button>
-      ` : `
-        <button class="mi" id="miAccount" role="menuitem">Account</button>
-        <button class="mi" id="miSignOut" role="menuitem">Sign Out</button>
-      `}
-    </div>
-  `;
-
-  document.getElementById("tbSignIn")?.addEventListener("click", () => {
-    console.debug('[topbar] tbSignIn click');
-    setAuthScreen(true);
-  });
-  document.getElementById("tbSignUp")?.addEventListener("click", () => {
-    console.debug('[topbar] tbSignUp click');
-    setAuthScreen(true);
-  });
-  document.getElementById('miSignIn')?.addEventListener('click', ()=>{
-    console.debug('[menu] miSignIn click');
-    localStorage.removeItem('barber_guest_mode');
-    setAuthScreen(true);
-    closeMenu();
-  });
-
-  const btn = document.getElementById('acctBtn');
-  const menu = document.getElementById('acctMenu');
-  function closeMenu() {
-    menu.classList.remove("open");
-    btn.setAttribute("aria-expanded", "false");
-    document.removeEventListener("click", onDocClick);
-    document.removeEventListener("keydown", onEsc);
-  }
-  function onDocClick(e) { if (!menu.contains(e.target) && e.target !== btn) closeMenu(); }
-  function onEsc(e) { if (e.key === "Escape") closeMenu(); }
-
-  btn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    const open = menu.classList.toggle("open");
-    btn.setAttribute("aria-expanded", String(open));
-    if (open) {
-      setTimeout(() => {
-        document.addEventListener("click", onDocClick);
-        document.addEventListener("keydown", onEsc);
-      }, 0);
-    } else {
-      closeMenu();
-    }
-  });
-
-  document.getElementById('miAccount')?.addEventListener('click', ()=> {
-    document.querySelector('.nav-item[data-view="account"]')?.click();
-    closeMenu();
-  });
-  document.getElementById('miSignOut')?.addEventListener('click', async ()=>{
-    await supabase.auth.signOut();
-    localStorage.removeItem('barber_guest_mode');
-    closeMenu();
-    await refreshAuthUI();
-  });
-  document.getElementById('miSignIn')?.addEventListener('click', ()=>{
-    localStorage.removeItem('barber_guest_mode');
-    setAuthScreen(true);
-    closeMenu();
-  });
-}
-
-/* ========= CENTRAL AUTH REFRESH ========= */
-async function refreshAuthUI(){
-  const { data: { session } } = await supabase.auth.getSession();
-  const isGuest = localStorage.getItem('barber_guest_mode') === 'true';
-  const shouldShow = !session && !isGuest;
-
-  setAuthScreen(shouldShow);
-
-  setTimeout(() => {
-    const modal = document.getElementById('authView');
-    const app   = document.querySelector('.app');
-    if (!modal || !app) return;
-
-    const cs = getComputedStyle(modal).display;
-    console.debug('[auth] post-setAuthScreen computed display =', cs, { shouldShow });
-
-    // If it *still* isn't visible, hard-force again.
-    if (shouldShow && cs === 'none') {
-      console.debug('[auth] forcing modal visible (fallback)');
-      modal.style.setProperty('display','flex','important');
-      app.style.setProperty('filter','blur(4px)','important');
-      app.style.setProperty('pointer-events','none','important');
-      console.debug('[auth] after-force display =', getComputedStyle(modal).display);
-    }
-  }, 0);
-
-  await renderTopbar();
-}
-
-/* ========= BUTTON HANDLERS ========= */
-btnGuest?.addEventListener('click', async () => {
-  console.debug('[auth] Guest clicked');
-  localStorage.setItem('barber_guest_mode', 'true');
-  await refreshAuthUI();                 // single source of truth
-  if (authEmail) authEmail.value = '';
-  if (authPass)  authPass.value  = '';
-  msg('Browsing as guest.');
-});
-
-btnIn?.addEventListener('click', async () => {
-  msg('');
-  const email = (authEmail?.value || '').trim();
-  const password = authPass?.value || '';
-  if (!email || !password){ msg('Enter email and password.'); return; }
-
-  try {
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    console.log('[signIn] data:', data, 'error:', error);
-    if (error) { msg(error.message); return; }
-
-    if (!data?.session) {
-      msg('Signed in, but no session returned. Check email verification.');
-      return;
-    }
-    localStorage.removeItem('barber_guest_mode');
-    await refreshAuthUI();
-    await loadCloudState?.();
-    window.renderWeek?.(); window.renderMonth?.();
-  } catch (e) {
-    console.error('[signIn] exception', e);
-    msg('Sign in failed. See console.');
-  }
-});
-
-btnUp?.addEventListener('click', async () => {
-  msg('');
-  const email = (authEmail?.value || '').trim();
-  const password = authPass?.value || '';
-  if (!email || !password){ msg('Enter email and password.'); return; }
-
-  try {
-    const { data, error } = await supabase.auth.signUp({ email, password });
-    console.log('[signUp] data:', data, 'error:', error);
-    if (error) { msg(error.message); return; }
-
-    if (!data?.session) { msg('Check your email to confirm, then sign in.'); return; }
-
-    localStorage.removeItem('barber_guest_mode');
-    msg('Account created. You are now signed in.');
-    await refreshAuthUI();
-    await loadCloudState?.();
-    window.renderWeek?.(); window.renderMonth?.();
-  } catch (e) {
-    console.error('[signUp] exception', e);
-    msg('Sign up failed. See console.');
-  }
-});
-
-/* ========= AUTH STATE LISTENER ========= */
-supabase.auth.onAuthStateChange(async (_event, session) => {
-  if (session) {
-    localStorage.removeItem('barber_guest_mode');
-    await loadCloudState();  // now safe, guarded
-  }
-  await refreshAuthUI();
-  window.renderWeek?.(); window.renderMonth?.();
-});
-
-/* ========= BOOT ========= */
-refreshAuthUI();
-  
 /* ---------- Utilities ---------- */
 const fmtDate = (d)=> new Date(d.getTime() - d.getTimezoneOffset()*60000).toISOString().slice(0,10);
 const pad = n => String(n).padStart(2,'0');
@@ -921,59 +672,45 @@ async function getSessionUser() {
 }
 
 async function loadCloudState() {
-  try {
-    const user = await getSessionUser();
-    if (!user) return false;
+  const user = await getSessionUser();
+  if (!user) return false;
 
-    const { data, error } = await supabase
-      .from('barber_state')
-      .select('data')
-      .eq('user_id', user.id)
-      .single();
+  const { data, error } = await supabase
+    .from('barber_state')
+    .select('data')
+    .eq('user_id', user.id)
+    .single();
 
-    if (error && error.code !== 'PGRST116') {
-      console.warn('[cloud] load error:', error);
-      return false;
-    }
-    if (data?.data) {
-      state = {
-        ...state,
-        ...data.data,
-        weekCursor: data.data.weekCursor ? new Date(data.data.weekCursor) : state.weekCursor,
-        monthCursor: data.data.monthCursor ? new Date(data.data.monthCursor) : state.monthCursor,
-      };
-      saveLocalOnly();
-      return true;
-    } else {
-      // create empty row but don't fail if it errors
-      const { error: insErr } = await supabase.from('barber_state').insert({ user_id: user.id, data: state });
-      if (insErr) console.warn('[cloud] insert error:', insErr);
-      return true;
-    }
-  } catch (err) {
-    console.warn('[cloud] load exception:', err);
+  if (error && error.code !== 'PGRST116') {
+    console.warn('Cloud load error', error);
     return false;
+  }
+  if (data?.data) {
+    state = {
+      ...state,
+      ...data.data,
+      weekCursor: data.data.weekCursor ? new Date(data.data.weekCursor) : state.weekCursor,
+      monthCursor: data.data.monthCursor ? new Date(data.data.monthCursor) : state.monthCursor,
+    };
+    saveLocalOnly();  // keep a local copy as backup
+    return true;
+  } else {
+    // Create empty row if first time
+    await supabase.from('barber_state').insert({ user_id: user.id, data: state });
+    return true;
   }
 }
 
 async function saveCloudState() {
-  try {
-    const user = await getSessionUser();
-    if (!user) return; // guest: skip silently
-
-    const payload = {
-      ...state,
-      weekCursor: state.weekCursor?.toISOString?.(),
-      monthCursor: state.monthCursor?.toISOString?.(),
-    };
-    const { error } = await supabase
-      .from('barber_state')
-      .upsert({ user_id: user.id, data: payload }, { onConflict: 'user_id' });
-
-    if (error) console.warn('[cloud] save error:', error);
-  } catch (err) {
-    console.warn('[cloud] save exception:', err);
-  }
+  const user = await getSessionUser();
+  if (!user) return;
+  const payload = {
+    ...state,
+    weekCursor: state.weekCursor?.toISOString?.(),
+    monthCursor: state.monthCursor?.toISOString?.(),
+  };
+  await supabase.from('barber_state')
+    .upsert({ user_id: user.id, data: payload });
 }
 
 function saveLocalOnly(){
@@ -1398,80 +1135,6 @@ clearBlackouts.addEventListener('click', ()=>{
   state.blackoutDays = {};
   save(); renderMonth(); renderWeek();
 });
-  
-  document.addEventListener('click', (e) => {
-  const id = e.target && e.target.id;
-  if (id === 'tbSignIn' || id === 'tbSignUp' || id === 'miSignIn') {
-    e.preventDefault();
-    localStorage.removeItem('barber_guest_mode');
-    setAuthScreen(true);
-  }
-});
-
-  document.addEventListener('click', async (e) => {
-  const t = e.target;
-  if (!t || !t.id) return;
-
-  // ---- AUTH MODAL BUTTONS (delegated) ----
-  if (t.id === 'btnGuest') {
-    console.debug('[auth] Guest clicked (delegated)');
-    localStorage.setItem('barber_guest_mode', 'true');
-    await refreshAuthUI();
-    const em = document.getElementById('authEmail');
-    const pw = document.getElementById('authPassword');
-    if (em) em.value = '';
-    if (pw) pw.value = '';
-    const m = document.getElementById('authMsg');
-    if (m) m.textContent = 'Browsing as guest.';
-    return;
-  }
-
-  if (t.id === 'btnSignIn') {
-    console.debug('[auth] Sign In clicked (delegated)');
-    const em = (document.getElementById('authEmail')?.value || '').trim();
-    const pw = (document.getElementById('authPassword')?.value || '');
-    const m  = document.getElementById('authMsg');
-    if (!em || !pw) { if (m) m.textContent = 'Enter email and password.'; return; }
-    try {
-      const { data, error } = await supabase.auth.signInWithPassword({ email: em, password: pw });
-      console.log('[signIn] data:', data, 'error:', error);
-      if (error) { if (m) m.textContent = error.message; return; }
-      if (!data?.session) { if (m) m.textContent = 'Signed in, but no session returned. Check email verification.'; return; }
-      localStorage.removeItem('barber_guest_mode');
-      await refreshAuthUI();
-      await (window.loadCloudState?.());
-      window.renderWeek?.(); window.renderMonth?.();
-    } catch (err) {
-      console.error('[signIn] exception', err);
-      if (m) m.textContent = 'Sign in failed. See console.';
-    }
-    return;
-  }
-
-  if (t.id === 'btnSignUp') {
-    console.debug('[auth] Sign Up clicked (delegated)');
-    const em = (document.getElementById('authEmail')?.value || '').trim();
-    const pw = (document.getElementById('authPassword')?.value || '');
-    const m  = document.getElementById('authMsg');
-    if (!em || !pw) { if (m) m.textContent = 'Enter email and password.'; return; }
-    try {
-      const { data, error } = await supabase.auth.signUp({ email: em, password: pw });
-      console.log('[signUp] data:', data, 'error:', error);
-      if (error) { if (m) m.textContent = error.message; return; }
-      if (!data?.session) { if (m) m.textContent = 'Check your email to confirm, then sign in.'; return; }
-      localStorage.removeItem('barber_guest_mode');
-      if (m) m.textContent = 'Account created. You are now signed in.';
-      await refreshAuthUI();
-      await (window.loadCloudState?.());
-      window.renderWeek?.(); window.renderMonth?.();
-    } catch (err) {
-      console.error('[signUp] exception', err);
-      if (m) m.textContent = 'Sign up failed. See console.';
-    }
-    return;
-  }
-});
-
 
   if (rcpSave) {
   rcpSave.addEventListener('click', ()=>{
@@ -1520,59 +1183,6 @@ paintReceptionistForm();
   console.assert(heads === 8, `Expected 8 headers (including top-left), got ${heads}`);
 })();
 
-  // ===== DEBUG + GUARD PATCH FOR AUTH MODAL =====
-(() => {
-  const modal = document.getElementById('authView');
-  const app   = document.querySelector('.app');
-
-  // Log any external changes to modal.style
-  new MutationObserver((muts) => {
-    muts.forEach(m => {
-      console.log('[MO] authView style changed ->', modal.getAttribute('style'));
-    });
-  }).observe(modal, { attributes:true, attributeFilter:['style'] });
-
-  // Keep last intent & debounce hides for a moment after a show
-  let lastIntent = null;       // 'show' | 'hide'
-  let safeUntil  = 0;          // timestamp
-
-  // Monkey-patch setAuthScreen
-  const _orig = window.setAuthScreen;
-  window.setAuthScreen = function(visible){
-    const by = new Error('[TRACE setAuthScreen]').stack;
-    console.debug('[auth] setAuthScreen call ->', visible, '\n', by);
-
-    const now = Date.now();
-    if (visible) {
-      lastIntent = 'show';
-      safeUntil = now + 1200; // 1.2s grace to block accidental hide
-      modal.style.setProperty('display','flex','important');
-      modal.style.setProperty('z-index','9999','important');
-      modal.style.setProperty('position','fixed','important');
-      modal.style.setProperty('inset','0','important');
-      app.style.setProperty('filter','blur(4px)','important');
-      app.style.setProperty('pointer-events','none','important');
-    } else {
-      // Block hides if they happen immediately after a show (likely a race)
-      if (now < safeUntil && lastIntent === 'show') {
-        console.warn('[auth] hide suppressed (race after show)');
-        return;
-      }
-      lastIntent = 'hide';
-      modal.style.setProperty('display','none','important');
-      app.style.setProperty('filter','none','important');
-      app.style.setProperty('pointer-events','auto','important');
-    }
-  };
-
-  // Add global helpers to test quickly
-  window.showAuth = () => window.setAuthScreen(true);
-  window.hideAuth = () => window.setAuthScreen(false);
-
-  console.log('[auth] debug patch installed');
-})();
-
-
 /* ---------- Public API (future backend hook) ----------
 window.getSchedulePayload = () => ({
   slotLen: state.slotLen,
@@ -1582,6 +1192,244 @@ window.getSchedulePayload = () => ({
   blackoutDays: state.blackoutDays
 });
 ------------------------------------------------------ */
+</script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script>
+  const SUPABASE_URL = "https://rfodbzbekelwmvjsntda.supabase.co";
+  const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJmb2RiemJla2Vsd212anNudGRhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTkxMDk2OTQsImV4cCI6MjA3NDY4NTY5NH0.yggTGamGf69NeToTDDvjHRycXbLERfkaFowK-Q1a6-s";
+  console.log('supabase global?', !!window.supabase); // should log true
+  const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+</script>
+
+<script>
+  const appRoot   = document.querySelector('.app');
+  const authView  = document.getElementById('authView');
+  const authEmail = document.getElementById('authEmail');
+  const authPass  = document.getElementById('authPassword');
+  const btnIn     = document.getElementById('btnSignIn');
+  const btnUp     = document.getElementById('btnSignUp');
+  const authMsg   = document.getElementById('authMsg');
+  const btnGuest  = document.getElementById('btnGuest');
+
+  // --- Avatar helpers ---
+  function initialsFromEmail(email = "") {
+    const name = email.split("@")[0].replace(/[^a-z0-9]+/gi, " ").trim();
+    const parts = name.split(" ").filter(Boolean);
+    const first = parts[0]?.[0] || email?.[0] || "?";
+    const second = parts[1]?.[0] || "";
+    return (first + second).toUpperCase();
+  }
+  function displayNameFromUser(user) {
+    return user?.user_metadata?.full_name || user?.email || "User";
+  }
+  
+  function setAuthScreen(visible){
+    const appRoot = document.querySelector('.app');
+    const authView = document.getElementById('authView');
+    if (!appRoot || !authView) return;
+    authView.style.display   = visible ? 'flex' : 'none';
+    appRoot.style.filter     = visible ? 'blur(4px)' : 'none';
+    appRoot.style.pointerEvents = visible ? 'none' : 'auto';
+  }
+
+  btnIn?.addEventListener('click', async () => {
+    authMsg.textContent = '';
+    const email = (authEmail?.value || '').trim();
+    const password = authPass?.value || '';
+    if (!email || !password){ authMsg.textContent = 'Enter email and password.'; return; }
+  
+    try {
+      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+      console.log('[signIn] data:', data, 'error:', error);
+      if (error) { authMsg.textContent = error.message; return; }
+      if (!data?.session) { 
+        // Usually only happens if email isn’t confirmed yet or settings changed
+        authMsg.textContent = 'Signed in, but no session returned. Check email verification settings.';
+        return;
+      }
+      localStorage.removeItem('barber_guest_mode');
+      await refreshAuthUI();
+      await loadCloudState();
+      renderWeek(); renderMonth();
+    } catch (e) {
+      console.error('[signIn] exception', e);
+      authMsg.textContent = 'Sign in failed. See console for details.';
+    }
+  });
+  
+  btnUp?.addEventListener('click', async () => {
+    authMsg.textContent = '';
+    const email = (authEmail?.value || '').trim();
+    const password = authPass?.value || '';
+    if (!email || !password){ authMsg.textContent = 'Enter email and password.'; return; }
+  
+    try {
+      const { data, error } = await supabase.auth.signUp({ email, password });
+      console.log('[signUp] data:', data, 'error:', error);
+      if (error) { authMsg.textContent = error.message; return; }
+  
+      // If email confirmations are ON (default), no session yet:
+      if (!data?.session) {
+        authMsg.textContent = 'Check your email to confirm your account, then come back to sign in.';
+        return;
+      }
+  
+      // If confirmations are OFF (or magic link flow), you get a session:
+      localStorage.removeItem('barber_guest_mode');
+      authMsg.textContent = 'Account created. You are now signed in.';
+      await refreshAuthUI();
+      await loadCloudState();
+      renderWeek(); renderMonth();
+    } catch (e) {
+      console.error('[signUp] exception', e);
+      authMsg.textContent = 'Sign up failed. See console for details.';
+    }
+  });
+
+
+  btnGuest?.addEventListener('click', ()=>{
+    localStorage.setItem('barber_guest_mode', 'true'); // flag guest mode
+    setAuthScreen(false);                               // hide auth modal
+    renderTopbar();
+  });
+
+  // Add a Sign Out button somewhere you want (e.g., sidebar). If you have no button yet, you can later add:
+  // <button id="btnSignOut" class="secondary">Sign Out</button>
+  document.getElementById('btnSignOut')?.addEventListener('click', async ()=>{
+    await supabase.auth.signOut();
+    await refreshAuthUI();
+  });
+
+ // --- Topbar rendering ---
+  function nameFromEmail(email){
+    if (!email) return "Account";
+    const base = email.split("@")[0] || "Account";
+    return base.replace(/[._-]+/g," ").replace(/\b\w/g, c=>c.toUpperCase());
+  }
+  function initialFromEmail(email){
+    const n = nameFromEmail(email);
+    return (n.trim()[0] || "A").toUpperCase();
+  }
+
+  async function renderTopbar(){
+    const wrap = document.getElementById("topbarAccount");
+    if (!wrap) return;
+  
+    const guestMode = localStorage.getItem("barber_guest_mode") === "true";
+    const { data: { session } } = await supabase.auth.getSession();
+    const user = session?.user || null;
+  
+    // If real user exists, real user wins over guest flag.
+    const isGuest = !user && guestMode;
+  
+    if (!user && !isGuest){
+      wrap.innerHTML = `
+        <button class="btn small" id="tbSignIn">Sign In</button>
+        <button class="btn small secondary" id="tbSignUp">Sign Up</button>
+      `;
+      document.getElementById("tbSignIn")?.addEventListener("click", () => {
+        document.getElementById("authView").style.display = "flex";
+      });
+      document.getElementById("tbSignUp")?.addEventListener("click", () => {
+        document.getElementById("authView").style.display = "flex";
+      });
+      return;
+    }
+
+    // Logged in OR guest
+    const email = session?.user?.email || "guest@barber.ai";
+    const displayName = isGuest ? "Guest" : (user?.user_metadata?.full_name || user?.email || "User");
+    const initials = (isGuest ? "G" : (user?.email || displayName || "?"))
+      .split("@")[0].replace(/[^a-z0-9]+/gi," ").trim().split(" ").map(s=>s[0]).join("").slice(0,2).toUpperCase() || "U";
+
+    wrap.innerHTML = `
+      <button class="avatar-btn" id="acctBtn" aria-haspopup="menu" aria-expanded="false">
+        <span class="avatar-circle">${initials}</span>
+        <span class="avatar-name">${displayName}</span>
+      </button>
+      <div class="menu" id="acctMenu" role="menu">
+        ${isGuest ? `
+          <div style="padding:6px 10px; color:#8a93a6;">Browsing as guest</div>
+          <button class="mi" id="miSignIn" role="menuitem">Sign In</button>
+        ` : `
+          <button class="mi" id="miAccount" role="menuitem">Account</button>
+          <button class="mi" id="miSignOut" role="menuitem">Sign Out</button>
+        `}
+      </div>
+    `;
+
+    // Toggle menu
+    const btn = document.getElementById('acctBtn');
+    const menu = document.getElementById('acctMenu');
+    function closeMenu() {
+      menu.classList.remove("open");
+      btn.setAttribute("aria-expanded", "false");
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onEsc);
+    }
+    function onDocClick(e) {
+      if (!menu.contains(e.target) && e.target !== btn) closeMenu();
+    }
+    function onEsc(e) {
+      if (e.key === "Escape") closeMenu();
+    }
+
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = menu.classList.toggle("open");
+      btn.setAttribute("aria-expanded", String(open));
+      if (open) {
+        // attach once per open
+        setTimeout(() => {
+          document.addEventListener("click", onDocClick);
+          document.addEventListener("keydown", onEsc);
+        }, 0);
+      } else {
+        closeMenu();
+      }
+    });
+
+    // Menu actions
+    document.getElementById('miAccount')?.addEventListener('click', ()=> {
+    document.querySelector('.nav-item[data-view="account"]')?.click();
+      closeMenu();
+    });
+    document.getElementById('miSignOut')?.addEventListener('click', async ()=>{
+      await supabase.auth.signOut();
+      localStorage.removeItem('barber_guest_mode');
+      closeMenu();
+      refreshAuthUI();
+    });
+    document.getElementById('miSignIn')?.addEventListener('click', ()=>{
+      localStorage.removeItem('barber_guest_mode');
+      document.getElementById('authView').style.display = 'flex';
+      closeMenu();
+    });
+  }
+
+  // Hook the topbar into your existing auth flow
+  async function refreshAuthUI(){
+    // Don’t early-return on guest if a real session exists.
+    const { data: { session } } = await supabase.auth.getSession();
+    const hasSession = !!session;
+  
+    // Show auth overlay only if no session and not guest.
+    const isGuest = localStorage.getItem('barber_guest_mode') === 'true';
+    setAuthScreen(!hasSession && !isGuest);
+  
+    await renderTopbar();
+  }
+
+  supabase.auth.onAuthStateChange(async (_event, session) => {
+    if (session) localStorage.removeItem('barber_guest_mode');
+    await refreshAuthUI();
+    await loadCloudState();   // ✅ now valid
+    renderWeek();
+    renderMonth();
+  });
+
+  // Kick off
+  refreshAuthUI();
 </script>
 
 
