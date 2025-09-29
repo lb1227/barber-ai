@@ -214,15 +214,12 @@ const VAD = {
 };
 const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
 
-// === Word-likeness gating (for barge-in only) — NEW ===
+// === Word-likeness gating (for barge-in and user turns) ===
 const WL_WINDOW_MS = 900;               // look-back window for syllable-like peaks
 const MIN_WL_PEAKS_FOR_BARGE = 2;       // need ≥2 peaks in window to count as words
 const WL_HIGH_MARGIN = 0.02;            // how far above continue threshold to count a “peak”
--const POST_BOT_TURN_COOLDOWN_MS = 600;  // short echo guard after bot finishes
-+const POST_BOT_TURN_COOLDOWN_MS = 900;  // slightly longer echo guard after bot finishes
-
-+// NEW: also require word-like peaks for user turns (to avoid self-talk on noise)
-+const MIN_WL_PEAKS_USER_TURN = 2;
+const POST_BOT_TURN_COOLDOWN_MS = 900;  // slightly longer echo guard after bot finishes
+const MIN_WL_PEAKS_USER_TURN = 2;       // require word-like speech for user turns too
 
 // === NEW: enforce exact greeting + brief pause before listening ===
 const EXPECTED_GREETING = "thank you for calling mobile pet grooming, how can i help you today?";
@@ -246,8 +243,8 @@ const INSTRUCTIONS =
     "- Ask for **exactly one** piece of information per turn.",
     "- Allowed pairs: **(date + time)** and **(phone + address)** only.",
     "- Collect in this order: **name → service → species (dog/cat) → weight (approx lbs) → date & time → phone + address**.",
-+    "- When asking species, say: **“What kind of pet will we be grooming today?”** Do NOT add the weight question in the same turn.",
-+    "- After the caller answers species, then ask weight as: **“Sounds good. Do you know the approximate weight of your <dog/cat>?”** (fill the species word).",
+    "- When asking species, say: **“What kind of pet will we be grooming today?”** Do NOT add the weight question in the same turn.",
+    "- After the caller answers species, then ask weight as: **“Sounds good. Do you know the approximate weight of your <dog/cat>?”** (fill the species word).",
     "- Never join other fields; if you start a second request, **stop** and wait.",
     "- After each answer, acknowledge briefly and ask the next (single) question.",
     "- Always end your turn with a single question mark.",
@@ -408,8 +405,8 @@ wss.on("connection", (twilioWS) => {
 
     const nameTokens    = ["name", "first name", "last name"];
     const serviceTokens = ["service", "groom", "grooming", "bath", "nail", "trim"];
-+   const speciesTokens = ["species", "dog", "cat", "pet"];
-+   const weightTokens  = ["weight", "weigh", "pounds", "lbs", "lb"];
+    const speciesTokens = ["species", "dog", "cat", "pet"];
+    const weightTokens  = ["weight", "weigh", "pounds", "lbs", "lb"];
     const phoneTokens   = ["phone", "phone number", "callback", "contact number"];
     const addressTokens = ["address", "street", "zip", "zipcode", "postal", "city", "state"];
     const dateTokens    = ["date", "day", "today", "tomorrow", "monday","tuesday","wednesday","thursday","friday","saturday","sunday"];
@@ -419,8 +416,8 @@ wss.on("connection", (twilioWS) => {
     const cats = new Set();
     if (hasAny(nameTokens))    cats.add("name");
     if (hasAny(serviceTokens)) cats.add("service");
-+   if (hasAny(speciesTokens)) cats.add("species");
-+   if (hasAny(weightTokens))  cats.add("weight");
+    if (hasAny(speciesTokens)) cats.add("species");
+    if (hasAny(weightTokens))  cats.add("weight");
     if (hasAny(phoneTokens))   cats.add("phone");
     if (hasAny(addressTokens)) cats.add("address");
     if (hasAny(dateTokens))    cats.add("date");
@@ -496,8 +493,8 @@ wss.on("connection", (twilioWS) => {
       }
     }
 
-+   // Track word-likeness during user speech too (to gate commits)
-+   updateWordlike(level, VAD.RMS_START, VAD.RMS_CONTINUE);
+    // Track word-likeness during user speech too (to gate commits)
+    updateWordlike(level, VAD.RMS_START, VAD.RMS_CONTINUE);
 
     capturedFrames.push(b64);
     collectedBytes += Buffer.from(b64, "base64").length;
@@ -520,11 +517,11 @@ wss.on("connection", (twilioWS) => {
         resetUserCapture();
         return;
       }
-+     // NEW: require “clear English diction” via word-like peaks to avoid self-talk
-+     if (recentWordlikePeaks() < MIN_WL_PEAKS_USER_TURN) {
-+       resetUserCapture();
-+       return;
-+     }
+      // NEW: require “clear English diction” via word-like peaks to avoid self-talk
+      if (recentWordlikePeaks() < MIN_WL_PEAKS_USER_TURN) {
+        resetUserCapture();
+        return;
+      }
       
       for (const f of capturedFrames) {
         safeSendOpenAI({ type: "input_audio_buffer.append", audio: f });
@@ -908,13 +905,11 @@ wss.on("connection", (twilioWS) => {
           } else if (next === "service") {
             followup = "What kind of service would you like to book today—full grooming or just a bath?";
           } else if (next === "species") {
--            followup = "Will we be grooming a dog or a cat today?";
-+            followup = "What kind of pet will we be grooming today?";
+            followup = "What kind of pet will we be grooming today?";
           } else if (next === "weight_lbs") {
--            followup = "About how much does your pet weigh, roughly in pounds?";
-+            const sp = (args?.species || "").toString().toLowerCase();
-+            const animal = (sp === "dog" || sp === "cat") ? sp : "pet";
-+            followup = `Sounds good. Do you know the approximate weight of your ${animal}?`;
+            const sp = (args?.species || "").toString().toLowerCase();
+            const animal = (sp === "dog" || sp === "cat") ? sp : "pet";
+            followup = `Sounds good. Do you know the approximate weight of your ${animal}?`;
           } else if (next === "start_iso") {
             followup = "What date and time work best for your appointment?";
           } else if (next === "phone") {
