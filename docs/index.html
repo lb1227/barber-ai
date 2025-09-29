@@ -1478,6 +1478,23 @@ async function doSignOut(source = 'unknown') {
     }
   });
 
+  supabase.auth.onAuthStateChange(async (event, session) => {
+  console.log('[auth:event]', event, session);
+  try {
+    await refreshAuthUI();
+    if (event === 'SIGNED_IN' && session) {
+      await hydrateFromCloudAndRepaint();
+    }
+    if (event === 'SIGNED_OUT') {
+      // ensure UI stays signed-out
+      setAuthScreen(true);
+      forceTopbarSignedOut();
+    }
+  } catch (e) {
+    console.warn('[auth] handler error', e);
+  }
+});
+
 //kickoff
 (async () => {
   await refreshAuthUI();
