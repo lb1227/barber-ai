@@ -1164,7 +1164,6 @@ wss.on("connection", (twilioWS) => {
           voice: userCfg.voice || "verse",
           output_audio_format: "g711_ulaw",
           input_audio_format:  "g711_ulaw",
-          tools: /* keep your tools */,
           tool_choice: "auto",
           instructions: INSTRUCTIONS
         }
