@@ -202,24 +202,6 @@ function rmsOfMuLawBase64(b64) {
   }
 }
 
-// === ZCR helper (speech-likeness) — NEW ===
-function zcrOfMuLawBase64(b64) {
-  try {
-    const buf = Buffer.from(b64, "base64");
-    if (!buf.length) return 0;
-    let prev = muLawByteToPcm16(buf[0]);
-    let crossings = 0;
-    for (let i = 1; i < buf.length; i++) {
-      const cur = muLawByteToPcm16(buf[i]);
-      if ((prev > 400 && cur < -400) || (prev < -400 && cur > 400)) crossings++;
-      prev = cur;
-    }
-    return crossings / buf.length;
-  } catch {
-    return 0;
-  }
-}
-
 // ---------- Conversation policies (tunable) ----------
 const VAD = {
   FRAME_MS: 20,          // Twilio sends ~20ms frames
@@ -227,21 +209,16 @@ const VAD = {
   RMS_CONTINUE: 0.040,
   MIN_SPEECH_MS: 260,    // was 320 (slightly quicker)
   END_SILENCE_MS: 900,   // was 1200 (commit sooner)
-  BARGE_IN_MIN_MS: 340,  // was 220 → need ~0.34s to interrupt
+  BARGE_IN_MIN_MS: 220,  // require ~0.22s of speech to cancel assistant
   MAX_TURN_DURATION_MS: 6000,
 };
 const MIN_AVG_RMS = 0.030; // reject very quiet "turns"
 
 // === Word-likeness gating (for barge-in only) — NEW ===
 const WL_WINDOW_MS = 900;               // look-back window for syllable-like peaks
-const MIN_WL_PEAKS_FOR_BARGE = 3;       // was 2 → need ≥3 peaks in window
+const MIN_WL_PEAKS_FOR_BARGE = 2;       // need ≥2 peaks in window to count as words
 const WL_HIGH_MARGIN = 0.02;            // how far above continue threshold to count a “peak”
-const POST_BOT_TURN_COOLDOWN_MS = 900;  // short echo guard after bot finishes
-
-// === ZCR gating (speech-likeness) — NEW ===
-const ZCR_WINDOW_FRAMES = 12;         // ~240ms at 20ms/frame
-const ZCR_MIN_FOR_SPEECH = 0.03;      // speech-like lower bound
-const ZCR_MAX_FOR_SPEECH = 0.18;      // speech-like upper bound
+const POST_BOT_TURN_COOLDOWN_MS = 600;  // short echo guard after bot finishes
 
 // === NEW: enforce exact greeting + brief pause before listening ===
 const EXPECTED_GREETING = "thank you for calling mobile pet grooming, how can i help you today?";
@@ -263,13 +240,11 @@ const INSTRUCTIONS =
     "",
     "# Single-question policy (STRICT)",
     "- Ask for **exactly one** piece of information per turn.",
-    "- The **only allowed pair** is: **“What day and time work best for your appointment?”**",
-    "- Never combine other fields in one sentence (e.g., **no** “name and phone”, **no** “service and date”).",
-    "- Never join requests with “and”; ask one thing only.",
-    "- If you start a second request, **stop** and wait for the caller.",
-    "- Collect in this order: **name → service → phone → date & time**.",
-    "- After each answer, acknowledge briefly and ask the next single question.",
-    "- End your turn immediately after asking the question, and **always end with a question mark**.",
+    "- Allowed pairs: **(date + time)** and **(phone + address)** only.",
+    "- Collect in this order: **name → service → species (dog/cat) → weight (approx lbs) → date & time → phone + address**.",
+    "- Never join other fields; if you start a second request, **stop** and wait.",
+    "- After each answer, acknowledge briefly and ask the next (single) question.",
+    "- Always end your turn with a single question mark.",
   ].join("\n");
 
 // ---------- Start Twilio recording via REST (dual channels, both tracks) ----------
@@ -388,9 +363,6 @@ wss.on("connection", (twilioWS) => {
   let wlPeakTimes = [];
   let postBotUntilTs = 0;
 
-  // NEW: ZCR window for speech-likeness
-  let zcrWindow = [];
-
   function resetUserCapture() {
     userSpeechActive = false;
     userSpeechMs = 0;
@@ -405,9 +377,6 @@ wss.on("connection", (twilioWS) => {
     // NEW: reset word-likeness
     wlAbove = false;
     wlPeakTimes = [];
-
-    // NEW: reset ZCR window
-    zcrWindow = [];
   }
 
   // === Word-likeness helpers (syllable-like peaks) — NEW ===
@@ -427,12 +396,14 @@ wss.on("connection", (twilioWS) => {
     }
   }
 
+  // === Double-question detector (allow only “date and time” **or** “phone and address”) — UPDATED ===
   function isDisallowedDoubleQuestion(text) {
     const s = (text || "").toLowerCase();
 
     const nameTokens    = ["name", "first name", "last name"];
     const serviceTokens = ["service", "groom", "grooming", "bath", "nail", "trim"];
     const phoneTokens   = ["phone", "phone number", "callback", "contact number"];
+    const addressTokens = ["address", "street", "zip", "zipcode", "postal", "city", "state"];
     const dateTokens    = ["date", "day", "today", "tomorrow", "monday","tuesday","wednesday","thursday","friday","saturday","sunday"];
     const timeTokens    = ["time", "am", "pm", "morning", "afternoon", "evening"];
 
@@ -441,10 +412,14 @@ wss.on("connection", (twilioWS) => {
     if (hasAny(nameTokens))    cats.add("name");
     if (hasAny(serviceTokens)) cats.add("service");
     if (hasAny(phoneTokens))   cats.add("phone");
+    if (hasAny(addressTokens)) cats.add("address");
     if (hasAny(dateTokens))    cats.add("date");
     if (hasAny(timeTokens))    cats.add("time");
 
+    // Allowed pairs:
     if (cats.size === 2 && cats.has("date") && cats.has("time")) return false;
+    if (cats.size === 2 && cats.has("phone") && cats.has("address")) return false;
+
     return cats.size >= 2;
   }
 
@@ -457,8 +432,8 @@ wss.on("connection", (twilioWS) => {
         modalities: ["audio", "text"],
         conversation: "auto",
         instructions:
-          "Ask **only one** concise question for the next missing field (order: name → service → phone → date & time). " +
-          "Do not combine fields. The only allowed pair is: “What day and time work best for your appointment?”",
+          "Ask **only one** concise question for the next missing field (order: name → service → species (dog/cat) → weight (approx lbs) → date & time → phone + address). " +
+          "Do not combine fields. Allowed pairs: “date and time” or “phone and address” only.",
       },
     });
   }
@@ -474,16 +449,8 @@ wss.on("connection", (twilioWS) => {
       // Word-likeness tracking (syllable-like peaks)
       updateWordlike(level, VAD.RMS_START, VAD.RMS_CONTINUE);
 
-      // NEW: compute ZCR for this frame and keep a small moving window
-      const zcr = zcrOfMuLawBase64(b64);
-      zcrWindow.push(zcr);
-      if (zcrWindow.length > ZCR_WINDOW_FRAMES) zcrWindow.shift();
-      const avgZcr = zcrWindow.length
-        ? zcrWindow.reduce((a, b) => a + b, 0) / zcrWindow.length
-        : 0;
-
-      // Use a higher energy threshold to even start counting barge-in time
-      const bargeThresh = Math.max(VAD.RMS_START + 0.03, 0.09); // was +0.02
+      // Use a slightly higher threshold to start counting barge-in time
+      const bargeThresh = VAD.RMS_START + 0.02;
       if (level >= bargeThresh) {
         bargeMs += VAD.FRAME_MS;
       } else {
@@ -491,13 +458,8 @@ wss.on("connection", (twilioWS) => {
       }
 
       const peaks = recentWordlikePeaks();
-
-      // NEW: barge-in only if ALL conditions look like real speech
-      const speechLike =
-        avgZcr >= ZCR_MIN_FOR_SPEECH && avgZcr <= ZCR_MAX_FOR_SPEECH;
-
-      if (bargeMs >= VAD.BARGE_IN_MIN_MS && peaks >= MIN_WL_PEAKS_FOR_BARGE && speechLike) {
-        // Only cancel if we heard sustained, word-like, speech-like audio
+      if (bargeMs >= VAD.BARGE_IN_MIN_MS && peaks >= MIN_WL_PEAKS_FOR_BARGE) {
+        // Only cancel if we heard sustained, word-like speech
         safeSendOpenAI({ type: "response.cancel" });
         isAssistantSpeaking = false;
         awaitingResponse = false;
@@ -565,7 +527,7 @@ wss.on("connection", (twilioWS) => {
           conversation: "auto",
           instructions:
             "Stay warm and brief. Ask **only one** concise question next. " +
-            "If the caller provided name, service, start time, and phone, call `book_appointment`. " +
+            "If the caller provided name, service, species, weight, phone, address, and a start time, call `book_appointment`. " +
             "If they ask about availability, call `list_appointments`. " +
             "For rescheduling/canceling, confirm name and the date/time to change, then proceed. " +
             "Only discuss mobile pet grooming topics.",
@@ -603,11 +565,15 @@ wss.on("connection", (twilioWS) => {
     }
   }
 
+  // ---------- UPDATED: require species, weight_lbs, address ----------
   async function handleBookAppointment(args) {
     const {
       customer_name,
       phone,
       service,
+      species,
+      weight_lbs,
+      address,
       start_iso,
       duration_min = 30,
       notes = "",
@@ -616,8 +582,11 @@ wss.on("connection", (twilioWS) => {
 
     const PHONE_RE = /(?:\+?\d[\d\s().-]{6,}\d)/;
 
-    if (!customer_name || !service || !start_iso || !phone) {
+    if (!customer_name || !service || !species || !weight_lbs || !start_iso || !phone || !address) {
       return { ok: false, error: "Missing required fields." };
+    }
+    if (!["dog","cat"].includes(String(species).toLowerCase())) {
+      return { ok: false, error: "Species must be dog or cat." };
     }
     if (!PHONE_RE.test(String(phone))) {
       return { ok: false, error: "Invalid phone number." };
@@ -632,7 +601,10 @@ wss.on("connection", (twilioWS) => {
     const summary = `${service} — ${customer_name}`;
     const description =
       `Booked by phone receptionist.\n` +
-      (phone ? `Phone: ${phone}\n` : "") +
+      `Phone: ${phone}\n` +
+      `Species: ${species}\n` +
+      `Weight (lbs): ${weight_lbs}\n` +
+      `Address: ${address}\n` +
       (notes ? `Notes: ${notes}\n` : "");
 
     try {
@@ -678,17 +650,20 @@ wss.on("connection", (twilioWS) => {
               type: "object",
               properties: {
                 customer_name: { type: "string", description: "Caller’s name" },
-                phone: { type: "string", description: "Caller phone, if known" },
-                service: { type: "string", description: "Service name" },
+                phone: { type: "string", description: "Caller phone" },
+                service: { type: "string", description: "Service name (e.g., full grooming, bath)" },
+                species: { type: "string", enum: ["dog", "cat"], description: "Dog or cat" },
+                weight_lbs: { type: "number", minimum: 1, maximum: 250, description: "Approximate weight in pounds" },
+                address: { type: "string", description: "Service address (street, city, ZIP)" },
                 start_iso: {
                   type: "string",
                   description: "Start time in ISO 8601 with timezone (e.g. 2025-09-10T15:00:00-04:00)"
                 },
-                duration_min: { type: "number", description: "Duration in minutes (e.g. 30)", default: 30 },
+                duration_min: { type: "number", description: "Duration in minutes", default: 30 },
                 notes: { type: "string", description: "Optional extra notes (pet breed/size, address/ZIP, etc.)" },
                 attendees: { type: "array", items: { type: "string" }, description: "Optional attendee emails" }
               },
-              required: ["customer_name", "service", "start_iso", "phone"],
+              required: ["customer_name","service","species","weight_lbs","start_iso","phone","address"],
             },
           },
           {
@@ -800,8 +775,7 @@ wss.on("connection", (twilioWS) => {
           }
         }
 
-        // EARLY STOP: detect disallowed double-question (except date+time pair).
-        // Defer ~120ms so audio doesn't clip.
+        // EARLY STOP: detect disallowed double-question (except allowed pairs).
         if (!questionCutTimer && isDisallowedDoubleQuestion(assistantUtterance)) {
           questionCutTimer = setTimeout(() => {
             console.log("[Guard] disallowed double question → stop this turn (deferred)");
@@ -868,7 +842,16 @@ wss.on("connection", (twilioWS) => {
       return;
     }
 
-    function isBookingArgs(args) { return !!(args && args.customer_name && args.service && args.start_iso && args.phone); }
+    function isBookingArgs(args) {
+      return !!(args &&
+        args.customer_name &&
+        args.service &&
+        args.species &&
+        args.weight_lbs &&
+        args.start_iso &&
+        args.phone &&
+        args.address);
+    }
     function isListArgs(args) { return !!(args && (args.day || args.date_iso)); }
 
     async function finishToolCall(callId) {
@@ -883,20 +866,56 @@ wss.on("connection", (twilioWS) => {
       console.log("[TOOL NAME]", effectiveName || "(missing)", "args=", args);
 
       if (effectiveName === "book_appointment") {
+        // Hard gate: do not allow booking until all your required fields exist & look valid
+        const need = [];
         const PHONE_RE = /(?:\+?\d[\d\s().-]{6,}\d)/;
-        if (!args?.phone || !PHONE_RE.test(String(args.phone))) {
+
+        if (!args?.customer_name) need.push("customer_name");
+        if (!args?.service) need.push("service");
+        if (!args?.species) need.push("species");
+        if (args?.species && !["dog","cat"].includes(String(args.species).toLowerCase())) need.push("species");
+        if (!args?.weight_lbs || Number(args.weight_lbs) <= 0) need.push("weight_lbs");
+        if (!args?.start_iso) need.push("start_iso");
+        if (!args?.phone || !PHONE_RE.test(String(args.phone))) need.push("phone");
+        if (!args?.address) need.push("address");
+
+        if (need.length) {
+          // Ask ONLY the next missing item (with allowed doubles: date+time, phone+address)
+          let followup = "";
+          const order = ["customer_name","service","species","weight_lbs","start_iso","phone","address"];
+          const next = order.find(f => need.includes(f));
+
+          if (next === "customer_name") {
+            followup = "Can I get your name for the booking?";
+          } else if (next === "service") {
+            followup = "What kind of service would you like to book today—full grooming or just a bath?";
+          } else if (next === "species") {
+            followup = "Will we be grooming a dog or a cat today?";
+          } else if (next === "weight_lbs") {
+            followup = "About how much does your pet weigh, roughly in pounds?";
+          } else if (next === "start_iso") {
+            followup = "What date and time work best for your appointment?";
+          } else if (next === "phone") {
+            if (need.includes("address") && !need.some(f => ["customer_name","service","species","weight_lbs","start_iso"].includes(f))) {
+              followup = "To get you booked, can I get your phone number and service address?";
+            } else {
+              followup = "What’s the best phone number to reach you?";
+            }
+          } else if (next === "address") {
+            followup = "What’s the service address, including street and ZIP?";
+          }
+
           if (isAssistantSpeaking || awaitingResponse) safeSendOpenAI({ type: "response.cancel" });
           awaitingResponse = true;
           safeSendOpenAI({
             type: "response.create",
             response: {
-              modalities: ["audio", "text"],
+              modalities: ["audio","text"],
               conversation: "auto",
-              instructions:
-                "Warm and brief: ask only one question — “What’s the best phone number to reach you?” Then wait silently."
-            }
+              instructions: followup
+            },
           });
-          return;
+          return; // do NOT proceed to booking yet
         }
       }
 
@@ -922,7 +941,7 @@ wss.on("connection", (twilioWS) => {
           conversation: "auto",
           instructions:
             effectiveName === "book_appointment"
-              ? "Confirm the booking in one short sentence. If it failed, briefly explain and offer the next two options."
+              ? "Confirm the booking with the exact date and time in one short sentence, then say: “Is there anything else I can help you with?” Do **not** ask new questions unless the caller asks."
               : "Summarize that day’s schedule in one short, friendly sentence. If none or error, say so briefly.",
         },
       });
