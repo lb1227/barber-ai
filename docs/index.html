@@ -666,7 +666,12 @@ let state = {
     phone: ""
   }
 };
-function save(){ localStorage.setItem(storeKey, JSON.stringify(state)); }
+function save() {
+  // always keep local in sync
+  localStorage.setItem(storeKey, JSON.stringify(state));
+  // also push to cloud if logged in (guest mode skipped automatically)
+  scheduleCloudSave();
+}
 function load(){
   try{
     const raw = localStorage.getItem(storeKey);
@@ -684,6 +689,94 @@ function load(){
   }catch{}
 }
 load();
+
+  // ---- Cloud sync helpers (ADD THIS) ----
+async function getSessionUser() {
+  const { data: { session }, error } = await supabase.auth.getSession();
+  if (error) { console.warn('[auth] getSession error', error); }
+  return session?.user || null;
+}
+
+// Keep your local save, but expose a "local only" version too
+function saveLocalOnly() {
+  localStorage.setItem(storeKey, JSON.stringify(state));
+}
+
+// Debounced cloud write so we don't spam the DB
+let __cloudTimer = null;
+function scheduleCloudSave() {
+  clearTimeout(__cloudTimer);
+  __cloudTimer = setTimeout(saveCloudState, 600); // batch quick edits
+}
+
+async function saveCloudState() {
+  try {
+    const user = await getSessionUser();
+    if (!user) return; // guests stay local only
+
+    // Serialize dates so PostgREST doesn’t choke on Date objects
+    const payload = {
+      ...state,
+      weekCursor: state.weekCursor?.toISOString?.() || null,
+      monthCursor: state.monthCursor?.toISOString?.() || null,
+    };
+
+    const { error } = await supabase
+      .from('barber_state')
+      .upsert({ user_id: user.id, data: payload })
+      .select('user_id'); // to surface errors in console
+
+    if (error) console.warn('[cloud] save error', error);
+  } catch (e) {
+    console.warn('[cloud] save exception', e);
+  }
+}
+
+async function loadCloudState() {
+  try {
+    const user = await getSessionUser();
+    if (!user) return false; // no session → nothing to load
+
+    const { data, error } = await supabase
+      .from('barber_state')
+      .select('data, updated_at')
+      .eq('user_id', user.id)
+      .maybeSingle();
+
+    if (error) { console.warn('[cloud] load error', error); return false; }
+
+    if (data?.data) {
+      // Merge, preserving your current structure
+      const d = data.data;
+      state = {
+        ...state,
+        ...d,
+        weekCursor: d.weekCursor ? new Date(d.weekCursor) : state.weekCursor,
+        monthCursor: d.monthCursor ? new Date(d.monthCursor) : state.monthCursor,
+        receptionist: { ...state.receptionist, ...(d.receptionist || {}) }
+      };
+      saveLocalOnly();
+      return true;
+    }
+
+    // If no row yet, seed the cloud with local state
+    await saveCloudState();
+    return true;
+  } catch (e) {
+    console.warn('[cloud] load exception', e);
+    return false;
+  }
+}
+
+// Convenience: when user logs in, hydrate UI from cloud (or seed cloud)
+async function hydrateFromCloudAndRepaint() {
+  const ok = await loadCloudState();
+  // Repaint either way to reflect whatever we have
+  renderWeek();
+  renderMonth();
+  paintReceptionistForm?.();
+  return ok;
+}
 
 /* ---------- DOM refs ---------- */
 const startHour = document.getElementById('startHour');
@@ -1338,10 +1431,15 @@ window.getSchedulePayload = () => ({
   supabase.auth.onAuthStateChange((_event, _session) => {
     // Only one call; refreshAuthUI() will render the topbar.
     refreshAuthUI();
+    // when auth changes (login/logout), try to load cloud and repaint
+    await hydrateFromCloudAndRepaint();
   });
 
-  // Kick off
-  refreshAuthUI();
+  //kickoff
+(async () => {
+  await refreshAuthUI();
+  await hydrateFromCloudAndRepaint();
+})();
 </script>
 
 
