@@ -33,7 +33,6 @@ const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN;
 const ENFORCE_FIXED_GREETING = false; // disable for per-account greetings
-const EXPECTED_GREETING = "thank you for calling, how can i help you today?";
 let CURRENT_NEXT_TURN_PROMPT = "";
 let ASSISTANT_INSTRUCTIONS = "";
 
@@ -371,20 +370,6 @@ function buildAssistantInstructions(cfg = {}) {
   ].join("\n");
 }
 
-const TOOLS = buildTools(userCfg);
-safeSendOpenAI({
-  type: "session.update",
-  session: {
-    modalities: ["text","audio"],
-    voice: userCfg.voice || "verse",
-    output_audio_format: "g711_ulaw",
-    input_audio_format:  "g711_ulaw",
-    tools: TOOLS,
-    tool_choice: "auto",
-    instructions: ASSISTANT_INSTRUCTIONS,
-  }
-});
-
 // ---------- Start Twilio recording via REST (dual channels, both tracks) ----------
 async function startTwilioRecording(callSid) {
   try {
@@ -418,6 +403,32 @@ async function startTwilioRecording(callSid) {
   } catch (e) {
     console.error("[Recording] error", e);
   }
+}
+
+function buildTools(cfg = {}) {
+  const required = cfg.required_fields || ["customer_name","service","start_iso","phone","address"];
+  const props = {
+    customer_name: { type: "string", description: "Customer name" },
+    phone:         { type: "string", description: "Callback phone" },
+    service:       { type: "string", description: "Requested service" },
+    start_iso:     { type: "string", description: "Start time ISO 8601 with timezone" },
+    address:       { type: "string", description: "Service address" },
+    duration_min:  { type: "number", default: 30 },
+    notes:         { type: "string" },
+    attendees:     { type: "array", items: { type: "string" } },
+    ...(cfg.extra_fields || {})
+  };
+  return [
+    { type: "function", name: "book_appointment",
+      description: cfg.book_tool_description || "Create a calendar event for this business.",
+      parameters: { type: "object", properties: props, required } },
+    { type: "function", name: "list_appointments",
+      description: "List Google Calendar events for a day.",
+      parameters: { type: "object", properties: {
+        day: { type: "string", enum: ["today","tomorrow"] },
+        date_iso: { type: "string", description: "YYYY-MM-DD" },
+      } } }
+  ];
 }
 
 // ---------- Main bridge ----------
@@ -501,6 +512,8 @@ wss.on("connection", (twilioWS) => {
   let wlPeakTimes = [];
   let postBotUntilTs = 0;
 
+  let userCfg = null;
+
   function resetUserCapture() {
     userSpeechActive = false;
     userSpeechMs = 0;
@@ -549,8 +562,6 @@ wss.on("connection", (twilioWS) => {
     const cats = new Set();
     if (hasAny(nameTokens))    cats.add("name");
     if (hasAny(serviceTokens)) cats.add("service");
-    if (hasAny(speciesTokens)) cats.add("species");
-    if (hasAny(weightTokens))  cats.add("weight");
     if (hasAny(phoneTokens))   cats.add("phone");
     if (hasAny(addressTokens)) cats.add("address");
     if (hasAny(dateTokens))    cats.add("date");
@@ -825,11 +836,11 @@ function buildNextTurnPrompt(cfg = {}) {
       if (piece) {
         greetTranscript += piece.toLowerCase();
 
-        const drifted =
-          greetTranscript.includes("name") ||
-          greetTranscript.includes("service") ||
-          greetTranscript.includes("phone") ||
-          greetTranscript.length > EXPECTED_GREETING.length + 5;
+        const expected = (userCfg?.greeting || "Thank you for calling, how can I help you today?").toLowerCase();
+        const drifted = greetTranscript.includes("name")
+          || greetTranscript.includes("service")
+          || greetTranscript.includes("phone")
+          || greetTranscript.length > expected.length + 5;
 
         if (drifted) {
           safeSendOpenAI({ type: "response.cancel" });
@@ -838,8 +849,7 @@ function buildNextTurnPrompt(cfg = {}) {
             response: {
               modalities: ["audio", "text"],
               conversation: "auto",
-              instructions:
-                "Say exactly: 'Thank you for calling Mobile Pet Grooming, How can I help you today?'"
+              instructions: `Say exactly: '${(userCfg?.greeting || "Thank you for calling, how can I help you today?")}'`,
             },
           });
           greetTranscript = "";
@@ -1108,13 +1118,14 @@ function buildNextTurnPrompt(cfg = {}) {
       }
       // Fallback defaults if mapping missing
       userCfg ??= {
-        name: "Barber AI Receptionist",
-        greeting: "Hello, thank you for calling the barbershop! How can I help you today.",
+         name: "Business Receptionist",
+        greeting: "Hello, thanks for calling! How can I help you today?",
         voice: "verse",
         rate: 1.0, barge_in: true, end_silence_ms: 1000, timezone: "America/New_York"
       };
       CURRENT_NEXT_TURN_PROMPT = buildNextTurnPrompt(userCfg);
       ASSISTANT_INSTRUCTIONS = buildAssistantInstructions(userCfg);
+      const TOOLS = buildTools(userCfg);
 
       console.log(`[Call start] streamSid=${streamSid} userId=${userId || 'default'} config=`, userCfg);
       // Apply per-account voice/settings to the OpenAI session
