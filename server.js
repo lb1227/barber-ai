@@ -117,6 +117,7 @@ const server = http.createServer(async (req, res) => {
 
     // === Twilio voice ===
     if (path === "/voice") {
+      console.log("[/voice] To =", form.get("To"));
       if (req.method === "POST") {
         const form = await readForm(req);
         const toNumber = form.get("To");   // e.g. +15551234567
@@ -1125,7 +1126,8 @@ function buildNextTurnPrompt(cfg = {}) {
 
       const callSid = msg.start?.callSid;
       startTwilioRecording(callSid).catch(console.error);
-    
+
+      console.log("[Start] customParameters =", custom);
       const custom = msg.start?.customParameters || {};
       const userId = custom.user_id || null;
     
