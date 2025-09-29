@@ -853,24 +853,30 @@ function getReceptionistPayloadFromState() {
 // Convenience: when user logs in, hydrate UI from cloud (or seed cloud)
 async function hydrateFromCloudAndRepaint() {
   try {
-    const cfg = await apiFetch('/api/me/config'); // GET
-    state.receptionist = {
-      ...state.receptionist,
-      name:         cfg.name ?? state.receptionist.name,
-      greeting:     cfg.greeting ?? state.receptionist.greeting,
-      voice:        cfg.voice ?? state.receptionist.voice,
-      rate:         typeof cfg.rate === 'number' ? cfg.rate : state.receptionist.rate,
-      bargeIn:      typeof cfg.barge_in === 'boolean' ? cfg.barge_in : state.receptionist.bargeIn,
-      endSilenceMs: typeof cfg.end_silence_ms === 'number' ? cfg.endSilenceMs : state.receptionist.endSilenceMs,
-      timezone:     cfg.timezone ?? state.receptionist.timezone,
-      phone:        cfg.phone ?? state.receptionist.phone
-    };
-    saveLocalOnly();
+    const cfg = await apiFetch('/api/me/config'); // GET -> { ... } or null/404
+
+    if (cfg && typeof cfg === 'object') {
+      state.receptionist = {
+        ...state.receptionist,
+        name:         cfg.name ?? state.receptionist.name,
+        greeting:     cfg.greeting ?? state.receptionist.greeting,
+        voice:        cfg.voice ?? state.receptionist.voice,
+        rate:         (typeof cfg.rate === 'number' ? cfg.rate : state.receptionist.rate),
+        bargeIn:      (typeof cfg.barge_in === 'boolean' ? cfg.barge_in : state.receptionist.bargeIn),
+        endSilenceMs: (typeof cfg.end_silence_ms === 'number' ? cfg.end_silence_ms : state.receptionist.endSilenceMs),
+        timezone:     cfg.timezone ?? state.receptionist.timezone,
+        phone:        cfg.phone ?? state.receptionist.phone,
+      };
+      saveLocalOnly();
+    } else {
+      // no server row yet; keep local defaults
+      console.log('[api] /api/me/config returned empty; keeping local receptionist state');
+    }
   } catch (e) {
     console.warn('[api] GET /api/me/config failed; using local state', e);
   }
 
-  // (optional) also call your existing loadCloudState() for scheduling
+  // Keep your existing scheduling state load
   try { await loadCloudState(); } catch {}
 
   renderWeek();
@@ -878,6 +884,7 @@ async function hydrateFromCloudAndRepaint() {
   paintReceptionistForm?.();
   return true;
 }
+
 
 
 /* ---------- DOM refs ---------- */
