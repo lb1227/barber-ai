@@ -819,24 +819,24 @@ async function ensureReceptionistRowExists() {
 
 // Convenience: when user logs in, hydrate UI from cloud (or seed cloud)
 async function hydrateFromCloudAndRepaint() {
-  const okState = await loadCloudState(); // your existing barber_state load (scheduling)
+  const okState = await loadCloudState();
 
-  // Pull receptionist_config too and merge if present
- const cfg = await fetchReceptionistConfig();
+  const cfg = await fetchReceptionistConfig();
   if (cfg) {
     state.receptionist = {
-    ...state.receptionist,
-    name: cfg.name ?? state.receptionist.name,
-    greeting: cfg.greeting ?? state.receptionist.greeting,
-    voice: cfg.voice ?? state.receptionist.voice,
-    rate: typeof cfg.rate === 'number' ? cfg.rate : state.receptionist.rate,
-    bargeIn: typeof cfg.barge_in === 'boolean' ? cfg.barge_in : state.receptionist.bargeIn,
-    endSilenceMs: typeof cfg.end_silence_ms === 'number' ? cfg.end_silence_ms : state.receptionist.endSilenceMs,
-    timezone: cfg.timezone ?? state.receptionist.timezone,+     phone: cfg.phone ?? state.receptionist.phone,
-   };
-    saveLocalOnly(); // persist merged receptionist to localStorage
+      ...state.receptionist,
+      name: cfg.name ?? state.receptionist.name,
+      greeting: cfg.greeting ?? state.receptionist.greeting,
+      voice: cfg.voice ?? state.receptionist.voice,
+      rate: typeof cfg.rate === 'number' ? cfg.rate : state.receptionist.rate,
+      bargeIn: typeof cfg.barge_in === 'boolean' ? cfg.barge_in : state.receptionist.bargeIn,
+      endSilenceMs: typeof cfg.end_silence_ms === 'number' ? cfg.endSilenceMs : state.receptionist.endSilenceMs,
+      timezone: cfg.timezone ?? state.receptionist.timezone,
+      phone: cfg.phone ?? state.receptionist.phone,
+    };
+    saveLocalOnly();
   }
-  // Repaint either way to reflect whatever we have
+
   renderWeek();
   renderMonth();
   paintReceptionistForm?.();
