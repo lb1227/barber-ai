@@ -33,6 +33,7 @@ const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN;
 const ENFORCE_FIXED_GREETING = false; // disable for per-account greetings
+let CURRENT_NEXT_TURN_PROMPT = "";
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY env var");
@@ -646,18 +647,46 @@ wss.on("connection", (twilioWS) => {
         response: {
           modalities: ["audio", "text"],
           conversation: "auto",
-          instructions:
-            "Stay warm and brief. Ask **only one** concise question next. " +
-            "If the caller provided name, service, species, weight, phone, address, and a start time, call `book_appointment`. " +
-            "If they ask about availability, call `list_appointments`. " +
-            "For rescheduling/canceling, confirm name and the date/time to change, then proceed. " +
-            "Only discuss mobile pet grooming topics.",
+          instructions: CURRENT_NEXT_TURN_PROMPT
         },
       });
       resetUserCapture();
     }
   }
 
+function buildNextTurnPrompt(cfg = {}) {
+  const bizName = cfg.business_name || "this business";
+  // scope line: keep the bot on-topic for THIS business
+  const scopeLine = cfg.scope
+    ? cfg.scope
+    : `Only discuss topics related to ${bizName} and booking/logistics for it.`;
+
+  // collection order (override per business if you like)
+  const askOrder = cfg.ask_order || [
+    "name", "service", "date_time", "phone_address"
+  ];
+  // allowed pairs
+  const allowedPairs = cfg.allowed_pairs || ["date_time", "phone_address"];
+
+  const orderHuman = askOrder
+    .map(k => ({
+      name: "name",
+      service: "service",
+      date_time: "date & time",
+      phone_address: "phone + address",
+      // keep your pet fields if a business wants them:
+      species: "species",
+      weight_lbs: "weight (approx lbs)"
+    }[k] || k)).join(" → ");
+
+  return [
+    "Stay warm and brief. Ask **only one** concise question next.",
+    `Collect in this order: **${orderHuman}**.`,
+    `Allowed pairs: **(${allowedPairs.includes("date_time") ? "date + time" : ""}${allowedPairs.includes("phone_address") ? (allowedPairs.includes("date_time") ? ") and (" : "") + "phone + address" : ""})** only.`.replace(/\(\)\s*only\./, "none."), // tidy if none
+    scopeLine
+  ].join(" ");
+}
+  
   async function handleListAppointments(args) {
     const { day, date_iso } = args || {};
     let target = date_iso ? new Date(date_iso) : new Date();
@@ -1195,6 +1224,7 @@ wss.on("connection", (twilioWS) => {
         voice: "verse",
         rate: 1.0, barge_in: true, end_silence_ms: 1000, timezone: "America/New_York"
       };
+      CURRENT_NEXT_TURN_PROMPT = buildNextTurnPrompt(userCfg);
 
       console.log(`[Call start] streamSid=${streamSid} userId=${userId || 'default'} config=`, userCfg);
       // Apply per-account voice/settings to the OpenAI session
