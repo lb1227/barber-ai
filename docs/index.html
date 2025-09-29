@@ -856,6 +856,19 @@ function formatTime12h(hours, minutes = 0) {
   const e = end.toLocaleDateString(undefined, opts);
   return `${s} – ${e}`;
 }
+
+  // put this near your router helpers
+function gotoSchedulingIfNotThere(opts = { replace: true }) {
+  const target = '#scheduling';
+  if (location.hash === target) return; // already there
+  if (opts.replace) {
+    history.replaceState(null, '', target); // no extra back history
+    // trigger a repaint the same way a hashchange would:
+    showView('scheduling');
+  } else {
+    location.hash = 'scheduling'; // creates a history entry
+  }
+}
  /* ---------- Receptionist hydrators and helpers ---------- */
   function paintReceptionistForm(){
   const r = state.receptionist;
@@ -1344,6 +1357,8 @@ async function doSignOut(source = 'manual') {
 
     const { data: { session } } = await supabase.auth.getSession();
     console.log('[signout] final session:', session);
+    // Navigate unless we're already on scheduling
+    gotoSchedulingIfNotThere({ replace: true });
   } catch (e) {
     console.error('[signout] error', e);
     alert('Sign out failed: ' + (e?.message || e));
@@ -1494,11 +1509,13 @@ window.doSignOut = doSignOut; // ensure your button calls this exact one
   
         if (event === 'SIGNED_IN' && session) {
           await hydrateFromCloudAndRepaint();
+          gotoSchedulingIfNotThere({ replace: true });
         }
   
         if (event === 'SIGNED_OUT') {
           setAuthScreen(true);
           forceTopbarSignedOut();
+          gotoSchedulingIfNotThere({ replace: true });
         }
       } catch (e) {
         console.warn('[auth] handler error', e);
