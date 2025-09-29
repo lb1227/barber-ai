@@ -117,11 +117,12 @@ const server = http.createServer(async (req, res) => {
 
     // === Twilio voice ===
     if (path === "/voice") {
-      console.log("[/voice] To =", form.get("To"));
       if (req.method === "POST") {
         const form = await readForm(req);
         const toNumber = form.get("To");   // e.g. +15551234567
         const callSid  = form.get("CallSid"); // optional for logs
+
+        console.log("[/voice] To =", form.get("To"));
     
         let userId = null;
         if (toNumber) userId = await findUserIdByNumber(toNumber);
