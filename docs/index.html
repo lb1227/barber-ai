@@ -1322,8 +1322,11 @@ async function doSignOut(source = 'manual') {
     const { error } = await supabase.auth.signOut(); // or { scope: 'global' } if you truly want all devices
     if (error) throw error;
 
+    console.log("Before removing guest mode");
     // 2) Never auto-fall back to guest
     localStorage.removeItem('barber_guest_mode');
+
+    console.log("After removing guest mode");
 
     // 3) Force the UI now (don’t wait for the auth event)
     setAuthScreen(true);
