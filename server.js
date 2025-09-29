@@ -32,6 +32,7 @@ const OPENAI_REALTIME_MODEL =
 const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN;
+const ENFORCE_FIXED_GREETING = false; // disable for per-account greetings
 
 if (!OPENAI_API_KEY) {
   console.error("Missing OPENAI_API_KEY env var");
@@ -752,7 +753,7 @@ wss.on("connection", (twilioWS) => {
   openaiWS.on("open", () => {
     console.log("[OpenAI] WS open]");
     // Configure to be reactive; our VAD drives turns.
-    safeSendOpenAI({
+    /*safeSendOpenAI({
       type: "session.update",
       session: {
         modalities: ["text", "audio"],
@@ -803,7 +804,7 @@ wss.on("connection", (twilioWS) => {
 
         instructions: INSTRUCTIONS,
       },
-    });
+    }); */
 
   while (openaiOutbox.length) openaiWS.send(openaiOutbox.shift());
   });
@@ -840,7 +841,7 @@ wss.on("connection", (twilioWS) => {
 
     // ====== LIVE TEXT GUARDS ======
     // 1) Greeting enforcement while greeting is being spoken
-    if (msg.type === "response.audio_transcript.delta" && greetingInFlight) {
+    if (ENFORCE_FIXED_GREETING && msg.type === "response.audio_transcript.delta" && greetingInFlight) {
       const piece = msg.delta || "";
       if (piece) {
         greetTranscript += piece.toLowerCase();
@@ -1126,6 +1127,42 @@ wss.on("connection", (twilioWS) => {
     }
   });
 
+  const TOOLS = [
+  {
+    type: "function",
+    name: "book_appointment",
+    description: "Create a Google Calendar event for a mobile pet grooming service. Ask for any missing details before calling this.",
+    parameters: {
+      type: "object",
+      properties: {
+        customer_name: { type: "string", description: "Caller’s name" },
+        phone: { type: "string", description: "Caller phone" },
+        service: { type: "string", description: "Service name (e.g., full grooming, bath)" },
+        species: { type: "string", enum: ["dog", "cat"], description: "Dog or cat" },
+        weight_lbs: { type: "number", minimum: 1, maximum: 250, description: "Approximate weight in pounds" },
+        address: { type: "string", description: "Service address (street, city, ZIP)" },
+        start_iso: { type: "string", description: "Start time in ISO 8601 with timezone" },
+        duration_min: { type: "number", description: "Duration in minutes", default: 30 },
+        notes: { type: "string", description: "Optional extra notes (pet breed/size, address/ZIP, etc.)" },
+        attendees: { type: "array", items: { type: "string" }, description: "Optional attendee emails" }
+      },
+      required: ["customer_name","service","species","weight_lbs","start_iso","phone","address"],
+    },
+  },
+  {
+    type: "function",
+    name: "list_appointments",
+    description: "List Google Calendar events for a specific day (today, tomorrow, or date_iso).",
+    parameters: {
+      type: "object",
+      properties: {
+        day: { type: "string", enum: ["today", "tomorrow"], description: "Shortcut day selector" },
+        date_iso: { type: "string", description: "Any date in ISO 8601; time ignored" }
+      }
+    }
+  }
+];
+
   // ---------- Twilio inbound ----------
   twilioWS.on("message", async (raw) => {
     let msg;
@@ -1139,6 +1176,9 @@ wss.on("connection", (twilioWS) => {
     if (msg.event === "start") {
       streamSid = msg.start.streamSid;
       twilioReady = true;
+
+      const callSid = msg.start?.callSid;
+      startTwilioRecording(callSid).catch(console.error);
     
       const custom = msg.start?.customParameters || {};
       const userId = custom.user_id || null;
@@ -1155,7 +1195,8 @@ wss.on("connection", (twilioWS) => {
         voice: "verse",
         rate: 1.0, barge_in: true, end_silence_ms: 1000, timezone: "America/New_York"
       };
-    
+
+      console.log(`[Call start] streamSid=${streamSid} userId=${userId || 'default'} config=`, userCfg);
       // Apply per-account voice/settings to the OpenAI session
       safeSendOpenAI({
         type: "session.update",
@@ -1164,6 +1205,7 @@ wss.on("connection", (twilioWS) => {
           voice: userCfg.voice || "verse",
           output_audio_format: "g711_ulaw",
           input_audio_format:  "g711_ulaw",
+          tools: TOOLS,
           tool_choice: "auto",
           instructions: INSTRUCTIONS
         }
@@ -1176,7 +1218,7 @@ wss.on("connection", (twilioWS) => {
         response: {
           modalities: ["audio", "text"],
           conversation: "auto",
-          instructions: userCfg.greeting || "Thank you for calling…"
+          instructions: userCfg.greeting || "Thank you for calling—how can I help you today?"
         }
       });
     
