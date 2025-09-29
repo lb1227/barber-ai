@@ -248,7 +248,7 @@
 }
 
   .receptionist-card {
-  max-width: 900px;
+  max-width: 720px;
   margin: 40px auto;
   border-radius: 16px;
   box-shadow: 0 2px 10px rgba(0,0,0,.3);
@@ -936,6 +936,15 @@ if (rcpReset) {
   });
 }
 
+  todayBtn?.addEventListener('click', () => {
+  // Jump the week grid to the current week (Sunday start)
+  state.weekCursor = weekStart(new Date());
+  // Jump the month grid to the current month
+  state.monthCursor = new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+  save();
+  renderWeek();
+  renderMonth();
+});
 
 /* ---------- First paint ---------- */
 renderWeek();
