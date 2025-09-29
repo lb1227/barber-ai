@@ -1297,21 +1297,37 @@ window.getSchedulePayload = () => ({
     renderTopbar();
   });
 
+  // --- signout ---
+  function forceTopbarSignedOut() {
+    const wrap = document.getElementById("topbarAccount");
+    if (!wrap) return;
+    wrap.innerHTML = `
+      <button class="btn small" id="tbSignIn">Sign In</button>
+      <button class="btn small secondary" id="tbSignUp">Sign Up</button>
+    `;
+    // wire the buttons to open the auth modal
+    document.getElementById("tbSignIn")?.addEventListener("click", () => {
+      document.getElementById("authView").style.display = "flex";
+    });
+    document.getElementById("tbSignUp")?.addEventListener("click", () => {
+      document.getElementById("authView").style.display = "flex";
+    });
+  }
+
 // --- signout ---
-  async function doSignOut(source = 'unknown') {
+async function doSignOut(source = 'unknown') {
   try {
     console.log(`[signout] clicked from: ${source}`);
-    const { error } = await supabase.auth.signOut(); // v2 SDK
+    const { error } = await supabase.auth.signOut();
     if (error) throw error;
 
-    // No ghost guest mode
     localStorage.removeItem('barber_guest_mode');
 
-    // Re-render immediately, then the auth state listener will fire too
-    await refreshAuthUI();
+    // Immediately reflect signed-out UI (no waiting on async listeners)
     setAuthScreen(true);
+    forceTopbarSignedOut();
 
-    // sanity: check session really gone
+    // Sanity: confirm session is gone in the background
     const { data: { session } } = await supabase.auth.getSession();
     console.log('[signout] session after signOut:', session);
   } catch (e) {
