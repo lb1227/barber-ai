@@ -1087,6 +1087,113 @@ window.getSchedulePayload = () => ({
   const authMsg   = document.getElementById('authMsg');
   const btnGuest  = document.getElementById('btnGuest');
 
+  // --- Avatar helpers ---
+  function initialsFromEmail(email = "") {
+    const name = email.split("@")[0].replace(/[^a-z0-9]+/gi, " ").trim();
+    const parts = name.split(" ").filter(Boolean);
+    const first = parts[0]?.[0] || email?.[0] || "?";
+    const second = parts[1]?.[0] || "";
+    return (first + second).toUpperCase();
+  }
+  function displayNameFromUser(user) {
+    return user?.user_metadata?.full_name || user?.email || "User";
+  }
+  
+  // --- Topbar render ---
+  async function renderTopbar() {
+    const wrap = document.getElementById("topbarAccount");
+    if (!wrap) return;
+  
+    // session or guest?
+    const guest = localStorage.getItem("barber_guest_mode") === "true";
+    const { data: { session } } = await supabase.auth.getSession();
+    const user = session?.user || null;
+  
+    if (!user && !guest) {
+      // Not signed in → show Sign In / Sign Up
+      wrap.innerHTML = `
+        <button class="btn small" id="tbSignIn">Sign In</button>
+        <button class="btn small secondary" id="tbSignUp">Sign Up</button>
+      `;
+      document.getElementById("tbSignIn")?.addEventListener("click", () => {
+        // open your auth modal
+        document.getElementById("authView").style.display = "flex";
+      });
+      document.getElementById("tbSignUp")?.addEventListener("click", () => {
+        document.getElementById("authView").style.display = "flex";
+      });
+      return;
+    }
+  
+    // Signed-in or Guest → avatar + menu
+    const isGuest = guest && !user;
+    const name = isGuest ? "Guest" : displayNameFromUser(user);
+    const initials = isGuest ? "G" : initialsFromEmail(user?.email || name);
+  
+    wrap.innerHTML = `
+      <button class="avatar-btn" id="acctBtn" aria-haspopup="menu" aria-expanded="false">
+        <span class="avatar-circle">${initials}</span>
+        <span class="avatar-name">${name}</span>
+      </button>
+      <div class="menu" id="acctMenu" role="menu">
+        ${isGuest ? `
+          <button class="mi" id="miSignIn" role="menuitem">Sign In</button>
+        ` : `
+          <button class="mi" id="miAccount" role="menuitem">Account</button>
+          <button class="mi" id="miSignOut" role="menuitem">Sign Out</button>
+        `}
+      </div>
+    `;
+  
+    const btn = document.getElementById("acctBtn");
+    const menu = document.getElementById("acctMenu");
+  
+    function closeMenu() {
+      menu.classList.remove("open");
+      btn.setAttribute("aria-expanded", "false");
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onEsc);
+    }
+    function onDocClick(e) {
+      if (!menu.contains(e.target) && e.target !== btn) closeMenu();
+    }
+    function onEsc(e) {
+      if (e.key === "Escape") closeMenu();
+    }
+  
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = menu.classList.toggle("open");
+      btn.setAttribute("aria-expanded", String(open));
+      if (open) {
+        setTimeout(() => {
+          document.addEventListener("click", onDocClick);
+          document.addEventListener("keydown", onEsc);
+        }, 0);
+      } else {
+        closeMenu();
+      }
+    });
+  
+    // menu actions
+    document.getElementById("miSignIn")?.addEventListener("click", () => {
+      closeMenu();
+      document.getElementById("authView").style.display = "flex";
+    });
+    document.getElementById("miAccount")?.addEventListener("click", () => {
+      closeMenu();
+      // route to a future “Account” view or open a modal
+      alert("Account panel coming soon.");
+    });
+    document.getElementById("miSignOut")?.addEventListener("click", async () => {
+      closeMenu();
+      await supabase.auth.signOut();
+      localStorage.removeItem("barber_guest_mode");
+      await refreshAuthUI();   // hide auth overlay if needed
+      renderTopbar();          // re-render topbar to show Sign In / Sign Up
+    });
+  }
+
   function setAuthScreen(visible){
     if (!appRoot || !authView) return;
     authView.style.display = visible ? 'flex' : 'none';
@@ -1225,23 +1332,25 @@ window.getSchedulePayload = () => ({
   }
 
   // Hook the topbar into your existing auth flow
-  async function refreshAuthUI(){
+  async function refreshAuthUI() {
+    // Guest mode?
     if (localStorage.getItem('barber_guest_mode') === 'true') {
-      renderTopbar(null);            // show guest avatar
       setAuthScreen(false);
+      await renderTopbar();   // show Guest avatar
       return;
     }
+
+    // Supabase session?
     const { data: { session } } = await supabase.auth.getSession();
-    renderTopbar(session);
     setAuthScreen(!session);
+    await renderTopbar();     // render avatar/buttons for current state
   }
 
-  // Keep as you already have:
-  supabase.auth.onAuthStateChange((_event, session) => {
-    renderTopbar(session);
+  supabase.auth.onAuthStateChange((_event, _session) => {
+    // Only one call; refreshAuthUI() will render the topbar.
     refreshAuthUI();
   });
-  
+
   // Kick off
   refreshAuthUI();
 </script>
