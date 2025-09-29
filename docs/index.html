@@ -1099,32 +1099,7 @@ window.getSchedulePayload = () => ({
     return user?.user_metadata?.full_name || user?.email || "User";
   }
   
-  // --- Topbar render ---
-  async function renderTopbar() {
-    const wrap = document.getElementById("topbarAccount");
-    if (!wrap) return;
-  
-    // session or guest?
-    const guest = localStorage.getItem("barber_guest_mode") === "true";
-    const { data: { session } } = await supabase.auth.getSession();
-    const user = session?.user || null;
-  
-    if (!user && !guest) {
-      // Not signed in → show Sign In / Sign Up
-      wrap.innerHTML = `
-        <button class="btn small" id="tbSignIn">Sign In</button>
-        <button class="btn small secondary" id="tbSignUp">Sign Up</button>
-      `;
-      document.getElementById("tbSignIn")?.addEventListener("click", () => {
-        // open your auth modal
-        document.getElementById("authView").style.display = "flex";
-      });
-      document.getElementById("tbSignUp")?.addEventListener("click", () => {
-        document.getElementById("authView").style.display = "flex";
-      });
-      return;
-    }
-  
+  // --- Topbar render ---  
     // Signed-in or Guest → avatar + menu
     const isGuest = guest && !user;
     const name = isGuest ? "Guest" : displayNameFromUser(user);
@@ -1195,52 +1170,42 @@ window.getSchedulePayload = () => ({
   }
 
   function setAuthScreen(visible){
+    const appRoot = document.querySelector('.app');
+    const authView = document.getElementById('authView');
     if (!appRoot || !authView) return;
-    authView.style.display = visible ? 'flex' : 'none';
-    appRoot.style.filter   = visible ? 'blur(4px)' : 'none';
+    authView.style.display   = visible ? 'flex' : 'none';
+    appRoot.style.filter     = visible ? 'blur(4px)' : 'none';
     appRoot.style.pointerEvents = visible ? 'none' : 'auto';
   }
 
-  async function refreshAuthUI(){
-    // If user chose guest mode, don’t show the auth overlay.
-    if (localStorage.getItem('barber_guest_mode') === 'true') {
-      setAuthScreen(false);
-      return;
-    }
-    const { data: { session } } = await supabase.auth.getSession();
-    setAuthScreen(!session);
-  }
-
-  btnIn?.addEventListener('click', async ()=>{
+  btnIn?.addEventListener('click', async () => {
     authMsg.textContent = '';
     const email = (authEmail?.value || '').trim();
     const password = authPass?.value || '';
     if (!email || !password){ authMsg.textContent = 'Enter email and password.'; return; }
     const { error } = await supabase.auth.signInWithPassword({ email, password });
     if (error){ authMsg.textContent = error.message; return; }
+    localStorage.removeItem('barber_guest_mode');   // <— important
     await refreshAuthUI();
   });
-
-  btnUp?.addEventListener('click', async ()=>{
+  
+  btnUp?.addEventListener('click', async () => {
     authMsg.textContent = '';
     const email = (authEmail?.value || '').trim();
     const password = authPass?.value || '';
     if (!email || !password){ authMsg.textContent = 'Enter email and password.'; return; }
     const { error } = await supabase.auth.signUp({ email, password });
     if (error){ authMsg.textContent = error.message; return; }
+    localStorage.removeItem('barber_guest_mode');   // <— important
     authMsg.textContent = 'Account created. You are now signed in.';
     await refreshAuthUI();
   });
 
+
   btnGuest?.addEventListener('click', ()=>{
     localStorage.setItem('barber_guest_mode', 'true'); // flag guest mode
     setAuthScreen(false);                               // hide auth modal
-    renderTopbar(null);
-  });
-
-  // React to sign-in/out in other tabs too
-  supabase.auth.onAuthStateChange((_event, _session) => {
-    refreshAuthUI();
+    renderTopbar();
   });
 
   // Add a Sign Out button somewhere you want (e.g., sidebar). If you have no button yet, you can later add:
@@ -1261,42 +1226,50 @@ window.getSchedulePayload = () => ({
     return (n.trim()[0] || "A").toUpperCase();
   }
 
-  function renderTopbar(session){
-    const wrap = document.getElementById('topbarAccount');
+  async function renderTopbar(){
+    const wrap = document.getElementById("topbarAccount");
     if (!wrap) return;
-
-    const guest = localStorage.getItem('barber_guest_mode') === 'true';
-
-    if (!session && !guest){
+  
+    const guestMode = localStorage.getItem("barber_guest_mode") === "true";
+    const { data: { session } } = await supabase.auth.getSession();
+    const user = session?.user || null;
+  
+    // If real user exists, real user wins over guest flag.
+    const isGuest = !user && guestMode;
+  
+    if (!user && !isGuest){
       wrap.innerHTML = `
         <button class="btn small" id="tbSignIn">Sign In</button>
         <button class="btn small secondary" id="tbSignUp">Sign Up</button>
       `;
-      document.getElementById('tbSignIn')?.addEventListener('click', ()=> {
-        // open existing auth overlay you already have
-        document.getElementById('authView').style.display = 'flex';
+      document.getElementById("tbSignIn")?.addEventListener("click", () => {
+        document.getElementById("authView").style.display = "flex";
       });
-      document.getElementById('tbSignUp')?.addEventListener('click', ()=> {
-        document.getElementById('authView').style.display = 'flex';
+      document.getElementById("tbSignUp")?.addEventListener("click", () => {
+        document.getElementById("authView").style.display = "flex";
       });
       return;
     }
 
     // Logged in OR guest
     const email = session?.user?.email || "guest@barber.ai";
-    const display = session?.user?.email ? nameFromEmail(email) : "Guest";
-    const initial = initialFromEmail(email);
+    const displayName = isGuest ? "Guest" : (user?.user_metadata?.full_name || user?.email || "User");
+    const initials = (isGuest ? "G" : (user?.email || displayName || "?"))
+      .split("@")[0].replace(/[^a-z0-9]+/gi," ").trim().split(" ").map(s=>s[0]).join("").slice(0,2).toUpperCase() || "U";
 
     wrap.innerHTML = `
-      <button class="avatar-btn" id="avatarBtn" aria-haspopup="menu" aria-expanded="false">
-        <span class="avatar-circle">${initial}</span>
-        <span class="avatar-name">${display}</span>
+      <button class="avatar-btn" id="acctBtn" aria-haspopup="menu" aria-expanded="false">
+        <span class="avatar-circle">${initials}</span>
+        <span class="avatar-name">${displayName}</span>
       </button>
-      <div class="menu" id="acctMenu">
-        ${session ? '' : '<div style="padding:6px 10px; color:#8a93a6;">Browsing as guest</div>'}
-        ${session ? '<button class="mi" id="miAccount">Account</button>' : ''}
-        <button class="mi" id="miDocs">Docs</button>
-        ${session ? '<button class="mi" id="miSignOut">Sign Out</button>' : '<button class="mi" id="miSignIn">Sign In</button>'}
+      <div class="menu" id="acctMenu" role="menu">
+        ${isGuest ? `
+          <div style="padding:6px 10px; color:#8a93a6;">Browsing as guest</div>
+          <button class="mi" id="miSignIn" role="menuitem">Sign In</button>
+        ` : `
+          <button class="mi" id="miAccount" role="menuitem">Account</button>
+          <button class="mi" id="miSignOut" role="menuitem">Sign Out</button>
+        `}
       </div>
     `;
 
@@ -1332,18 +1305,16 @@ window.getSchedulePayload = () => ({
   }
 
   // Hook the topbar into your existing auth flow
-  async function refreshAuthUI() {
-    // Guest mode?
-    if (localStorage.getItem('barber_guest_mode') === 'true') {
-      setAuthScreen(false);
-      await renderTopbar();   // show Guest avatar
-      return;
-    }
-
-    // Supabase session?
+  async function refreshAuthUI(){
+    // Don’t early-return on guest if a real session exists.
     const { data: { session } } = await supabase.auth.getSession();
-    setAuthScreen(!session);
-    await renderTopbar();     // render avatar/buttons for current state
+    const hasSession = !!session;
+  
+    // Show auth overlay only if no session and not guest.
+    const isGuest = localStorage.getItem('barber_guest_mode') === 'true';
+    setAuthScreen(!hasSession && !isGuest);
+  
+    await renderTopbar();
   }
 
   supabase.auth.onAuthStateChange((_event, _session) => {
