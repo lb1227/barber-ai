@@ -1318,16 +1318,17 @@ window.getSchedulePayload = () => ({
 async function doSignOut(source = 'unknown') {
   try {
     console.log(`[signout] clicked from: ${source}`);
-    const { error } = await supabase.auth.signOut();
+    const { error } = await supabase.auth.signOut(); // v2 SDK
     if (error) throw error;
 
+    // No ghost guest mode
     localStorage.removeItem('barber_guest_mode');
 
-    // Immediately reflect signed-out UI (no waiting on async listeners)
+    // Re-render immediately, then the auth state listener will fire too
     setAuthScreen(true);
     forceTopbarSignedOut();
 
-    // Sanity: confirm session is gone in the background
+    // sanity: check session really gone
     const { data: { session } } = await supabase.auth.getSession();
     console.log('[signout] session after signOut:', session);
   } catch (e) {
