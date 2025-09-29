@@ -1247,6 +1247,10 @@ window.getSchedulePayload = () => ({
 </script>
 
 <script>
+  // SAFETY NET: show any hidden errors
+  window.addEventListener('unhandledrejection', e => console.error('[unhandled]', e.reason));
+  window.addEventListener('error', e => console.error('[error]', e.error || e.message));
+  
   const appRoot   = document.querySelector('.app');
   const authView  = document.getElementById('authView');
   const authEmail = document.getElementById('authEmail');
@@ -1255,6 +1259,8 @@ window.getSchedulePayload = () => ({
   const btnUp     = document.getElementById('btnSignUp');
   const authMsg   = document.getElementById('authMsg');
   const btnGuest  = document.getElementById('btnGuest');
+
+  function msg(text){ authMsg.textContent = text || ''; }
 
   // --- Avatar helpers ---
   function initialsFromEmail(email = "") {
@@ -1278,64 +1284,66 @@ window.getSchedulePayload = () => ({
   }
 
   btnIn?.addEventListener('click', async () => {
-    authMsg.textContent = '';
+    msg('');
     const email = (authEmail?.value || '').trim();
     const password = authPass?.value || '';
-    if (!email || !password){ authMsg.textContent = 'Enter email and password.'; return; }
+    if (!email || !password){ msg('Enter email and password.'); return; }
   
+    btnIn.disabled = true; btnUp.disabled = true;
     try {
       const { data, error } = await supabase.auth.signInWithPassword({ email, password });
       console.log('[signIn] data:', data, 'error:', error);
-      if (error) { authMsg.textContent = error.message; return; }
-      if (!data?.session) { 
-        // Usually only happens if email isn’t confirmed yet or settings changed
-        authMsg.textContent = 'Signed in, but no session returned. Check email verification settings.';
-        return;
-      }
+      if (error) { msg(error.message); return; }
+      if (!data?.session) { msg('Signed in, but no session returned.'); return; }
+  
       localStorage.removeItem('barber_guest_mode');
-      await refreshAuthUI();
-      await loadCloudState();
+      await refreshAuthUI();     // hides modal + updates topbar
+      await loadCloudState();    // pulls your saved state
       renderWeek(); renderMonth();
+      authEmail.value = ''; authPass.value = ''; // clear fields
     } catch (e) {
       console.error('[signIn] exception', e);
-      authMsg.textContent = 'Sign in failed. See console for details.';
+      msg('Sign in failed. See console for details.');
+    } finally {
+      btnIn.disabled = false; btnUp.disabled = false;
     }
   });
   
   btnUp?.addEventListener('click', async () => {
-    authMsg.textContent = '';
+    msg('');
     const email = (authEmail?.value || '').trim();
     const password = authPass?.value || '';
-    if (!email || !password){ authMsg.textContent = 'Enter email and password.'; return; }
+    if (!email || !password){ msg('Enter email and password.'); return; }
   
+    btnIn.disabled = true; btnUp.disabled = true;
     try {
       const { data, error } = await supabase.auth.signUp({ email, password });
       console.log('[signUp] data:', data, 'error:', error);
-      if (error) { authMsg.textContent = error.message; return; }
+      if (error) { msg(error.message); return; }
   
-      // If email confirmations are ON (default), no session yet:
       if (!data?.session) {
-        authMsg.textContent = 'Check your email to confirm your account, then come back to sign in.';
+        msg('Check your email to confirm your account, then sign in.');
         return;
       }
   
-      // If confirmations are OFF (or magic link flow), you get a session:
       localStorage.removeItem('barber_guest_mode');
-      authMsg.textContent = 'Account created. You are now signed in.';
+      msg('Account created. You are now signed in.');
       await refreshAuthUI();
       await loadCloudState();
       renderWeek(); renderMonth();
+      authEmail.value = ''; authPass.value = '';
     } catch (e) {
       console.error('[signUp] exception', e);
-      authMsg.textContent = 'Sign up failed. See console for details.';
+      msg('Sign up failed. See console for details.');
+    } finally {
+      btnIn.disabled = false; btnUp.disabled = false;
     }
   });
 
 
-  btnGuest?.addEventListener('click', ()=>{
+  btnGuest?.addEventListener('click', async () => {
     localStorage.setItem('barber_guest_mode', 'true'); // flag guest mode
-    setAuthScreen(false);                               // hide auth modal
-    renderTopbar();
+    await refreshAuthUI();                              // hides modal + shows "Guest" in topbar
   });
 
   // Add a Sign Out button somewhere you want (e.g., sidebar). If you have no button yet, you can later add:
