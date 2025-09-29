@@ -1313,38 +1313,39 @@ window.getSchedulePayload = () => ({
     });
   }
 
+window.__signingOut = false;
 // --- signout ---
 async function doSignOut(source = 'manual') {
-  try {
-    console.log('[signout] from:', source);
+  __signingOut = true;
+  console.log('[signout] start from:', source);
 
-    // 1) Sign out (local scope is usually enough)
-    const { error } = await supabase.auth.signOut(); // or { scope: 'global' } if you truly want all devices
+  try {
+    const { error } = await supabase.auth.signOut();
     if (error) throw error;
 
-    console.log("Before removing guest mode");
-    // 2) Never auto-fall back to guest
+    console.log('[signout] BEFORE removing guest mode');
     localStorage.removeItem('barber_guest_mode');
+    console.log('[signout] AFTER removing guest mode');
 
-    console.log("After removing guest mode");
-
-    // 3) Force the UI now (don’t wait for the auth event)
     setAuthScreen(true);
-    await renderTopbar();     // <<< this was the missing piece for you
+    await renderTopbar(null);
 
-    // 4) (Optional) deep clean ONLY if you see a stuck session
-    Object.keys(localStorage)
-    .filter(k => k.startsWith('sb-') || k.includes('supabase'))
-    .forEach(k => localStorage.removeItem(k));
+    // Optional deep clean of SB keys:
+    for (const k of Object.keys(localStorage)) {
+      if (k.startsWith('sb-') || k.includes('supabase')) localStorage.removeItem(k);
+    }
 
-    // 5) Sanity log
     const { data: { session } } = await supabase.auth.getSession();
-    console.log('[signout] session is now:', session); // should be null
+    console.log('[signout] final session:', session);
   } catch (e) {
     console.error('[signout] error', e);
     alert('Sign out failed: ' + (e?.message || e));
+  } finally {
+    __signingOut = false;
   }
 }
+
+window.doSignOut = doSignOut; // ensure your button calls this exact one
  // --- Topbar rendering ---
   function nameFromEmail(email){
     if (!email) return "Account";
@@ -1469,34 +1470,36 @@ async function doSignOut(source = 'manual') {
     await renderTopbar();
   }
 
-  supabase.auth.onAuthStateChange(async (_event, _session) => {
-    try {
-      await refreshAuthUI();                 // re-render topbar/modal
-      const { data: { session } } = await supabase.auth.getSession();
-      if (session) {
-        await hydrateFromCloudAndRepaint();  // only when logged in
+  let __signingOut = false;
+  let __authTick;
+  const AUTH_DEBOUNCE = 50; // ms
+  
+  const { data: { subscription } } = supabase.auth.onAuthStateChange((event, session) => {
+    console.log('[auth:event]', event, session);
+  
+    if (__signingOut) {
+      console.log('[auth:event] skipped during manual sign-out');
+      return;
+    }
+  
+    clearTimeout(__authTick);
+    __authTick = setTimeout(async () => {
+      try {
+        await refreshAuthUI(); // always re-render topbar/modal
+  
+        if (event === 'SIGNED_IN' && session) {
+          await hydrateFromCloudAndRepaint();
+        }
+  
+        if (event === 'SIGNED_OUT') {
+          setAuthScreen(true);
+          forceTopbarSignedOut();
+        }
+      } catch (e) {
+        console.warn('[auth] handler error', e);
       }
-    } catch (e) {
-      console.warn('[auth] onAuthStateChange handler error', e);
-    }
+    }, AUTH_DEBOUNCE);
   });
-
-  supabase.auth.onAuthStateChange(async (event, session) => {
-  console.log('[auth:event]', event, session);
-  try {
-    await refreshAuthUI();
-    if (event === 'SIGNED_IN' && session) {
-      await hydrateFromCloudAndRepaint();
-    }
-    if (event === 'SIGNED_OUT') {
-      // ensure UI stays signed-out
-      setAuthScreen(true);
-      forceTopbarSignedOut();
-    }
-  } catch (e) {
-    console.warn('[auth] handler error', e);
-  }
-});
 
 //kickoff
 (async () => {
