@@ -418,6 +418,7 @@
       <button class="nav-item" data-view="receptionist">Edit Receptionist</button>
       <button class="nav-item" data-view="advanced">Advanced</button>
       <button class="nav-item" data-view="logs">Logs</button>
+      <button class="nav-item" data-view="account">Account</button>
     </nav>
   </aside>
 
@@ -589,6 +590,28 @@
     </div>
   </section>
 </section>
+
+  <section class="view" data-view="account" hidden>
+    <section class="card" style="max-width:720px;margin:24px auto;">
+      <header><h2>Account</h2></header>
+      <div style="padding:18px;display:grid;gap:14px;">
+        <div class="ctrl">
+          <label>Full name</label>
+          <input id="acctFullName" type="text" placeholder="Your name"/>
+        </div>
+        <div class="ctrl">
+          <label>Email</label>
+          <input id="acctEmail" type="email" disabled />
+        </div>
+        <div class="receptionist-actions" style="justify-content:flex-start;">
+          <button id="acctSave">Save</button>
+          <button class="secondary" id="acctResetPw">Send password reset email</button>
+          <button class="danger" id="acctSignOut">Sign Out</button>
+        </div>
+        <div class="hint" id="acctMsg"></div>
+      </div>
+    </section>
+  </section>
 </main>
 
 <footer>
@@ -690,6 +713,14 @@ const rcpPhone   = document.getElementById('rcpPhone');
 const rcpSave    = document.getElementById('rcpSave');
 const rcpReset   = document.getElementById('rcpReset');
 
+// Account Refs
+const acctFullName = document.getElementById('acctFullName');
+const acctEmail    = document.getElementById('acctEmail');
+const acctSave     = document.getElementById('acctSave');
+const acctResetPw  = document.getElementById('acctResetPw');
+const acctSignOut  = document.getElementById('acctSignOut');
+const acctMsg      = document.getElementById('acctMsg');
+
 
   /* === Left-nav view router === */
 function showView(name){
@@ -700,6 +731,7 @@ function showView(name){
     v.hidden = v.dataset.view !== name;
   });
   if (name === 'receptionist') paintReceptionistForm();
+  if (name === 'account') paintAccountForm();
 }
 document.querySelectorAll('.nav-item').forEach(b=>{
   b.addEventListener('click', ()=> showView(b.dataset.view));
@@ -744,6 +776,44 @@ function formatTime12h(hours, minutes = 0) {
   rcpTZ.value       = r.timezone ?? "America/New_York";
   rcpPhone.value    = r.phone ?? "";
 }
+
+async function paintAccountForm(){
+  const { data: { session } } = await supabase.auth.getSession();
+  const user = session?.user;
+  if (!user) {
+    acctEmail.value = "";
+    acctFullName.value = "";
+    acctMsg.textContent = "Not signed in.";
+    return;
+  }
+  acctEmail.value = user.email || "";
+  acctFullName.value = user.user_metadata?.full_name || "";
+  acctMsg.textContent = "";
+}
+
+// actions
+acctSave?.addEventListener('click', async ()=>{
+  acctMsg.textContent = "";
+  const full_name = (acctFullName.value || "").trim();
+  const { error } = await supabase.auth.updateUser({ data: { full_name } });
+  acctMsg.textContent = error ? error.message : "Saved!";
+  // re-render topbar so name updates
+  await renderTopbar();
+});
+
+acctResetPw?.addEventListener('click', async ()=>{
+  acctMsg.textContent = "";
+  const email = acctEmail.value;
+  if (!email){ acctMsg.textContent = "No email on file."; return; }
+  const { error } = await supabase.auth.resetPasswordForEmail(email /* , { redirectTo: 'https://yourapp.com/reset' } */);
+  acctMsg.textContent = error ? error.message : "Reset email sent.";
+});
+
+acctSignOut?.addEventListener('click', async ()=>{
+  await supabase.auth.signOut();
+  localStorage.removeItem('barber_guest_mode');
+  await refreshAuthUI();
+});
 
 function saveReceptionistFromForm(){
   state.receptionist = {
@@ -1237,7 +1307,7 @@ window.getSchedulePayload = () => ({
     // Menu actions
     document.getElementById('miAccount')?.addEventListener('click', ()=> {
       // route to Edit Receptionist as "account" area
-      document.querySelector('.nav-item[data-view="receptionist"]')?.click();
+      document.querySelector('.nav-itemdata-view="account"]')?.click();
       closeMenu();
     });
     document.getElementById('miSignOut')?.addEventListener('click', async ()=>{
