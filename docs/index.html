@@ -576,6 +576,11 @@
           <input id="rcpEOS" type="number" step="100" min="300" placeholder="1000"/>
         </div>
       </div>
+
+      <div class="receptionist-grid-actions">
+        <button id="advSave">Save</button>
+        <button class="secondary" id="advReset">Reset</button>
+      </div>
     
     </div>
 
@@ -1298,6 +1303,24 @@ if (rcpReset) {
   save();
   renderWeek();
   renderMonth();
+});
+
+document.getElementById('advSave')?.addEventListener('click', async () => {
+  saveReceptionistFromForm();
+  const { data: { session } } = await supabase.auth.getSession();
+  if (session) {
+    const res = await upsertReceptionistConfig();
+    if (!res.ok) console.warn('[cloud] upsert receptionist_config failed', res.error);
+  }
+});
+
+document.getElementById('advReset')?.addEventListener('click', () => {
+  // restore defaults for advanced-only fields
+  rcpVoice.value = "alloy";
+  rcpRate.value = 1.0;
+  rcpBarge.value = "true";
+  rcpEOS.value = 1000;
+  saveReceptionistFromForm();
 });
 
 /* ---------- First paint ---------- */
