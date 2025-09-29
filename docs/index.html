@@ -418,7 +418,6 @@
       <button class="nav-item" data-view="receptionist">Edit Receptionist</button>
       <button class="nav-item" data-view="advanced">Advanced</button>
       <button class="nav-item" data-view="logs">Logs</button>
-      <button class="nav-item" data-view="account">Account</button>
     </nav>
   </aside>
 
@@ -590,28 +589,6 @@
     </div>
   </section>
 </section>
-
-  <section class="view" data-view="account" hidden>
-    <section class="card" style="max-width:720px;margin:24px auto;">
-      <header><h2>Account</h2></header>
-      <div style="padding:18px;display:grid;gap:14px;">
-        <div class="ctrl">
-          <label>Full name</label>
-          <input id="acctFullName" type="text" placeholder="Your name"/>
-        </div>
-        <div class="ctrl">
-          <label>Email</label>
-          <input id="acctEmail" type="email" disabled />
-        </div>
-        <div class="receptionist-actions" style="justify-content:flex-start;">
-          <button id="acctSave">Save</button>
-          <button class="secondary" id="acctResetPw">Send password reset email</button>
-          <button class="danger" id="acctSignOut">Sign Out</button>
-        </div>
-        <div class="hint" id="acctMsg"></div>
-      </div>
-    </section>
-  </section>
 </main>
 
 <footer>
@@ -666,61 +643,7 @@ let state = {
     phone: ""
   }
 };
-async function getSessionUser() {
-  const { data: { session } } = await supabase.auth.getSession();
-  return session?.user || null;
-}
-
-async function loadCloudState() {
-  const user = await getSessionUser();
-  if (!user) return false;
-
-  const { data, error } = await supabase
-    .from('barber_state')
-    .select('data')
-    .eq('user_id', user.id)
-    .single();
-
-  if (error && error.code !== 'PGRST116') {
-    console.warn('Cloud load error', error);
-    return false;
-  }
-  if (data?.data) {
-    state = {
-      ...state,
-      ...data.data,
-      weekCursor: data.data.weekCursor ? new Date(data.data.weekCursor) : state.weekCursor,
-      monthCursor: data.data.monthCursor ? new Date(data.data.monthCursor) : state.monthCursor,
-    };
-    saveLocalOnly();  // keep a local copy as backup
-    return true;
-  } else {
-    // Create empty row if first time
-    await supabase.from('barber_state').insert({ user_id: user.id, data: state });
-    return true;
-  }
-}
-
-async function saveCloudState() {
-  const user = await getSessionUser();
-  if (!user) return;
-  const payload = {
-    ...state,
-    weekCursor: state.weekCursor?.toISOString?.(),
-    monthCursor: state.monthCursor?.toISOString?.(),
-  };
-  await supabase.from('barber_state')
-    .upsert({ user_id: user.id, data: payload });
-}
-
-function saveLocalOnly(){
-  localStorage.setItem(storeKey, JSON.stringify(state));
-}
-function save() {
-  localStorage.setItem("barber_gui_state_v1", JSON.stringify(state));
-  // Push to cloud too
-  saveCloudState();
-}
+function save(){ localStorage.setItem(storeKey, JSON.stringify(state)); }
 function load(){
   try{
     const raw = localStorage.getItem(storeKey);
@@ -767,14 +690,6 @@ const rcpPhone   = document.getElementById('rcpPhone');
 const rcpSave    = document.getElementById('rcpSave');
 const rcpReset   = document.getElementById('rcpReset');
 
-// Account Refs
-const acctFullName = document.getElementById('acctFullName');
-const acctEmail    = document.getElementById('acctEmail');
-const acctSave     = document.getElementById('acctSave');
-const acctResetPw  = document.getElementById('acctResetPw');
-const acctSignOut  = document.getElementById('acctSignOut');
-const acctMsg      = document.getElementById('acctMsg');
-
 
   /* === Left-nav view router === */
 function showView(name){
@@ -785,7 +700,6 @@ function showView(name){
     v.hidden = v.dataset.view !== name;
   });
   if (name === 'receptionist') paintReceptionistForm();
-  if (name === 'account') paintAccountForm();
 }
 document.querySelectorAll('.nav-item').forEach(b=>{
   b.addEventListener('click', ()=> showView(b.dataset.view));
@@ -830,44 +744,6 @@ function formatTime12h(hours, minutes = 0) {
   rcpTZ.value       = r.timezone ?? "America/New_York";
   rcpPhone.value    = r.phone ?? "";
 }
-
-async function paintAccountForm(){
-  const { data: { session } } = await supabase.auth.getSession();
-  const user = session?.user;
-  if (!user) {
-    acctEmail.value = "";
-    acctFullName.value = "";
-    acctMsg.textContent = "Not signed in.";
-    return;
-  }
-  acctEmail.value = user.email || "";
-  acctFullName.value = user.user_metadata?.full_name || "";
-  acctMsg.textContent = "";
-}
-
-// actions
-acctSave?.addEventListener('click', async ()=>{
-  acctMsg.textContent = "";
-  const full_name = (acctFullName.value || "").trim();
-  const { error } = await supabase.auth.updateUser({ data: { full_name } });
-  acctMsg.textContent = error ? error.message : "Saved!";
-  // re-render topbar so name updates
-  await renderTopbar();
-});
-
-acctResetPw?.addEventListener('click', async ()=>{
-  acctMsg.textContent = "";
-  const email = acctEmail.value;
-  if (!email){ acctMsg.textContent = "No email on file."; return; }
-  const { error } = await supabase.auth.resetPasswordForEmail(email /* , { redirectTo: 'https://yourapp.com/reset' } */);
-  acctMsg.textContent = error ? error.message : "Reset email sent.";
-});
-
-acctSignOut?.addEventListener('click', async ()=>{
-  await supabase.auth.signOut();
-  localStorage.removeItem('barber_guest_mode');
-  await refreshAuthUI();
-});
 
 function saveReceptionistFromForm(){
   state.receptionist = {
@@ -1193,11 +1069,11 @@ window.getSchedulePayload = () => ({
 });
 ------------------------------------------------------ */
 </script>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js"></script>
 <script>
   const SUPABASE_URL = "https://rfodbzbekelwmvjsntda.supabase.co";
   const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJmb2RiemJla2Vsd212anNudGRhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTkxMDk2OTQsImV4cCI6MjA3NDY4NTY5NH0.yggTGamGf69NeToTDDvjHRycXbLERfkaFowK-Q1a6-s";
-  console.log('supabase global?', !!window.supabase); // should log true
+
   const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 </script>
 
@@ -1223,74 +1099,148 @@ window.getSchedulePayload = () => ({
     return user?.user_metadata?.full_name || user?.email || "User";
   }
   
+  // --- Topbar render ---
+  async function renderTopbar() {
+    const wrap = document.getElementById("topbarAccount");
+    if (!wrap) return;
+  
+    // session or guest?
+    const guest = localStorage.getItem("barber_guest_mode") === "true";
+    const { data: { session } } = await supabase.auth.getSession();
+    const user = session?.user || null;
+  
+    if (!user && !guest) {
+      // Not signed in → show Sign In / Sign Up
+      wrap.innerHTML = `
+        <button class="btn small" id="tbSignIn">Sign In</button>
+        <button class="btn small secondary" id="tbSignUp">Sign Up</button>
+      `;
+      document.getElementById("tbSignIn")?.addEventListener("click", () => {
+        // open your auth modal
+        document.getElementById("authView").style.display = "flex";
+      });
+      document.getElementById("tbSignUp")?.addEventListener("click", () => {
+        document.getElementById("authView").style.display = "flex";
+      });
+      return;
+    }
+  
+    // Signed-in or Guest → avatar + menu
+    const isGuest = guest && !user;
+    const name = isGuest ? "Guest" : displayNameFromUser(user);
+    const initials = isGuest ? "G" : initialsFromEmail(user?.email || name);
+  
+    wrap.innerHTML = `
+      <button class="avatar-btn" id="acctBtn" aria-haspopup="menu" aria-expanded="false">
+        <span class="avatar-circle">${initials}</span>
+        <span class="avatar-name">${name}</span>
+      </button>
+      <div class="menu" id="acctMenu" role="menu">
+        ${isGuest ? `
+          <button class="mi" id="miSignIn" role="menuitem">Sign In</button>
+        ` : `
+          <button class="mi" id="miAccount" role="menuitem">Account</button>
+          <button class="mi" id="miSignOut" role="menuitem">Sign Out</button>
+        `}
+      </div>
+    `;
+  
+    const btn = document.getElementById("acctBtn");
+    const menu = document.getElementById("acctMenu");
+  
+    function closeMenu() {
+      menu.classList.remove("open");
+      btn.setAttribute("aria-expanded", "false");
+      document.removeEventListener("click", onDocClick);
+      document.removeEventListener("keydown", onEsc);
+    }
+    function onDocClick(e) {
+      if (!menu.contains(e.target) && e.target !== btn) closeMenu();
+    }
+    function onEsc(e) {
+      if (e.key === "Escape") closeMenu();
+    }
+  
+    btn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const open = menu.classList.toggle("open");
+      btn.setAttribute("aria-expanded", String(open));
+      if (open) {
+        setTimeout(() => {
+          document.addEventListener("click", onDocClick);
+          document.addEventListener("keydown", onEsc);
+        }, 0);
+      } else {
+        closeMenu();
+      }
+    });
+  
+    // menu actions
+    document.getElementById("miSignIn")?.addEventListener("click", () => {
+      closeMenu();
+      document.getElementById("authView").style.display = "flex";
+    });
+    document.getElementById("miAccount")?.addEventListener("click", () => {
+      closeMenu();
+      // route to a future “Account” view or open a modal
+      alert("Account panel coming soon.");
+    });
+    document.getElementById("miSignOut")?.addEventListener("click", async () => {
+      closeMenu();
+      await supabase.auth.signOut();
+      localStorage.removeItem("barber_guest_mode");
+      await refreshAuthUI();   // hide auth overlay if needed
+      renderTopbar();          // re-render topbar to show Sign In / Sign Up
+    });
+  }
+
   function setAuthScreen(visible){
-    const appRoot = document.querySelector('.app');
-    const authView = document.getElementById('authView');
     if (!appRoot || !authView) return;
-    authView.style.display   = visible ? 'flex' : 'none';
-    appRoot.style.filter     = visible ? 'blur(4px)' : 'none';
+    authView.style.display = visible ? 'flex' : 'none';
+    appRoot.style.filter   = visible ? 'blur(4px)' : 'none';
     appRoot.style.pointerEvents = visible ? 'none' : 'auto';
   }
 
-  btnIn?.addEventListener('click', async () => {
+  async function refreshAuthUI(){
+    // If user chose guest mode, don’t show the auth overlay.
+    if (localStorage.getItem('barber_guest_mode') === 'true') {
+      setAuthScreen(false);
+      return;
+    }
+    const { data: { session } } = await supabase.auth.getSession();
+    setAuthScreen(!session);
+  }
+
+  btnIn?.addEventListener('click', async ()=>{
     authMsg.textContent = '';
     const email = (authEmail?.value || '').trim();
     const password = authPass?.value || '';
     if (!email || !password){ authMsg.textContent = 'Enter email and password.'; return; }
-  
-    try {
-      const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-      console.log('[signIn] data:', data, 'error:', error);
-      if (error) { authMsg.textContent = error.message; return; }
-      if (!data?.session) { 
-        // Usually only happens if email isn’t confirmed yet or settings changed
-        authMsg.textContent = 'Signed in, but no session returned. Check email verification settings.';
-        return;
-      }
-      localStorage.removeItem('barber_guest_mode');
-      await refreshAuthUI();
-      await loadCloudState();
-      renderWeek(); renderMonth();
-    } catch (e) {
-      console.error('[signIn] exception', e);
-      authMsg.textContent = 'Sign in failed. See console for details.';
-    }
-  });
-  
-  btnUp?.addEventListener('click', async () => {
-    authMsg.textContent = '';
-    const email = (authEmail?.value || '').trim();
-    const password = authPass?.value || '';
-    if (!email || !password){ authMsg.textContent = 'Enter email and password.'; return; }
-  
-    try {
-      const { data, error } = await supabase.auth.signUp({ email, password });
-      console.log('[signUp] data:', data, 'error:', error);
-      if (error) { authMsg.textContent = error.message; return; }
-  
-      // If email confirmations are ON (default), no session yet:
-      if (!data?.session) {
-        authMsg.textContent = 'Check your email to confirm your account, then come back to sign in.';
-        return;
-      }
-  
-      // If confirmations are OFF (or magic link flow), you get a session:
-      localStorage.removeItem('barber_guest_mode');
-      authMsg.textContent = 'Account created. You are now signed in.';
-      await refreshAuthUI();
-      await loadCloudState();
-      renderWeek(); renderMonth();
-    } catch (e) {
-      console.error('[signUp] exception', e);
-      authMsg.textContent = 'Sign up failed. See console for details.';
-    }
+    const { error } = await supabase.auth.signInWithPassword({ email, password });
+    if (error){ authMsg.textContent = error.message; return; }
+    await refreshAuthUI();
   });
 
+  btnUp?.addEventListener('click', async ()=>{
+    authMsg.textContent = '';
+    const email = (authEmail?.value || '').trim();
+    const password = authPass?.value || '';
+    if (!email || !password){ authMsg.textContent = 'Enter email and password.'; return; }
+    const { error } = await supabase.auth.signUp({ email, password });
+    if (error){ authMsg.textContent = error.message; return; }
+    authMsg.textContent = 'Account created. You are now signed in.';
+    await refreshAuthUI();
+  });
 
   btnGuest?.addEventListener('click', ()=>{
     localStorage.setItem('barber_guest_mode', 'true'); // flag guest mode
     setAuthScreen(false);                               // hide auth modal
-    renderTopbar();
+    renderTopbar(null);
+  });
+
+  // React to sign-in/out in other tabs too
+  supabase.auth.onAuthStateChange((_event, _session) => {
+    refreshAuthUI();
   });
 
   // Add a Sign Out button somewhere you want (e.g., sidebar). If you have no button yet, you can later add:
@@ -1311,87 +1261,61 @@ window.getSchedulePayload = () => ({
     return (n.trim()[0] || "A").toUpperCase();
   }
 
-  async function renderTopbar(){
-    const wrap = document.getElementById("topbarAccount");
+  function renderTopbar(session){
+    const wrap = document.getElementById('topbarAccount');
     if (!wrap) return;
-  
-    const guestMode = localStorage.getItem("barber_guest_mode") === "true";
-    const { data: { session } } = await supabase.auth.getSession();
-    const user = session?.user || null;
-  
-    // If real user exists, real user wins over guest flag.
-    const isGuest = !user && guestMode;
-  
-    if (!user && !isGuest){
+
+    const guest = localStorage.getItem('barber_guest_mode') === 'true';
+
+    if (!session && !guest){
       wrap.innerHTML = `
         <button class="btn small" id="tbSignIn">Sign In</button>
         <button class="btn small secondary" id="tbSignUp">Sign Up</button>
       `;
-      document.getElementById("tbSignIn")?.addEventListener("click", () => {
-        document.getElementById("authView").style.display = "flex";
+      document.getElementById('tbSignIn')?.addEventListener('click', ()=> {
+        // open existing auth overlay you already have
+        document.getElementById('authView').style.display = 'flex';
       });
-      document.getElementById("tbSignUp")?.addEventListener("click", () => {
-        document.getElementById("authView").style.display = "flex";
+      document.getElementById('tbSignUp')?.addEventListener('click', ()=> {
+        document.getElementById('authView').style.display = 'flex';
       });
       return;
     }
 
     // Logged in OR guest
     const email = session?.user?.email || "guest@barber.ai";
-    const displayName = isGuest ? "Guest" : (user?.user_metadata?.full_name || user?.email || "User");
-    const initials = (isGuest ? "G" : (user?.email || displayName || "?"))
-      .split("@")[0].replace(/[^a-z0-9]+/gi," ").trim().split(" ").map(s=>s[0]).join("").slice(0,2).toUpperCase() || "U";
+    const display = session?.user?.email ? nameFromEmail(email) : "Guest";
+    const initial = initialFromEmail(email);
 
     wrap.innerHTML = `
-      <button class="avatar-btn" id="acctBtn" aria-haspopup="menu" aria-expanded="false">
-        <span class="avatar-circle">${initials}</span>
-        <span class="avatar-name">${displayName}</span>
+      <button class="avatar-btn" id="avatarBtn" aria-haspopup="menu" aria-expanded="false">
+        <span class="avatar-circle">${initial}</span>
+        <span class="avatar-name">${display}</span>
       </button>
-      <div class="menu" id="acctMenu" role="menu">
-        ${isGuest ? `
-          <div style="padding:6px 10px; color:#8a93a6;">Browsing as guest</div>
-          <button class="mi" id="miSignIn" role="menuitem">Sign In</button>
-        ` : `
-          <button class="mi" id="miAccount" role="menuitem">Account</button>
-          <button class="mi" id="miSignOut" role="menuitem">Sign Out</button>
-        `}
+      <div class="menu" id="acctMenu">
+        ${session ? '' : '<div style="padding:6px 10px; color:#8a93a6;">Browsing as guest</div>'}
+        ${session ? '<button class="mi" id="miAccount">Account</button>' : ''}
+        <button class="mi" id="miDocs">Docs</button>
+        ${session ? '<button class="mi" id="miSignOut">Sign Out</button>' : '<button class="mi" id="miSignIn">Sign In</button>'}
       </div>
     `;
 
     // Toggle menu
-    const btn = document.getElementById('acctBtn');
+    const btn = document.getElementById('avatarBtn');
     const menu = document.getElementById('acctMenu');
-    function closeMenu() {
-      menu.classList.remove("open");
-      btn.setAttribute("aria-expanded", "false");
-      document.removeEventListener("click", onDocClick);
-      document.removeEventListener("keydown", onEsc);
-    }
-    function onDocClick(e) {
-      if (!menu.contains(e.target) && e.target !== btn) closeMenu();
-    }
-    function onEsc(e) {
-      if (e.key === "Escape") closeMenu();
-    }
-
-    btn.addEventListener("click", (e) => {
+    function closeMenu(){ menu.classList.remove('open'); btn.setAttribute('aria-expanded','false'); }
+    btn?.addEventListener('click', (e)=>{
       e.stopPropagation();
-      const open = menu.classList.toggle("open");
-      btn.setAttribute("aria-expanded", String(open));
-      if (open) {
-        // attach once per open
-        setTimeout(() => {
-          document.addEventListener("click", onDocClick);
-          document.addEventListener("keydown", onEsc);
-        }, 0);
-      } else {
-        closeMenu();
-      }
+      const open = menu.classList.toggle('open');
+      btn.setAttribute('aria-expanded', open ? 'true' : 'false');
     });
+    document.addEventListener('click', closeMenu);
 
     // Menu actions
+    document.getElementById('miDocs')?.addEventListener('click', ()=> window.open('https://github.com/','_blank'));
     document.getElementById('miAccount')?.addEventListener('click', ()=> {
-    document.querySelector('.nav-item[data-view="account"]')?.click();
+      // route to Edit Receptionist as "account" area
+      document.querySelector('.nav-item[data-view="receptionist"]')?.click();
       closeMenu();
     });
     document.getElementById('miSignOut')?.addEventListener('click', async ()=>{
@@ -1408,24 +1332,23 @@ window.getSchedulePayload = () => ({
   }
 
   // Hook the topbar into your existing auth flow
-  async function refreshAuthUI(){
-    // Don’t early-return on guest if a real session exists.
+  async function refreshAuthUI() {
+    // Guest mode?
+    if (localStorage.getItem('barber_guest_mode') === 'true') {
+      setAuthScreen(false);
+      await renderTopbar();   // show Guest avatar
+      return;
+    }
+
+    // Supabase session?
     const { data: { session } } = await supabase.auth.getSession();
-    const hasSession = !!session;
-  
-    // Show auth overlay only if no session and not guest.
-    const isGuest = localStorage.getItem('barber_guest_mode') === 'true';
-    setAuthScreen(!hasSession && !isGuest);
-  
-    await renderTopbar();
+    setAuthScreen(!session);
+    await renderTopbar();     // render avatar/buttons for current state
   }
 
-  supabase.auth.onAuthStateChange(async (_event, session) => {
-    if (session) localStorage.removeItem('barber_guest_mode');
-    await refreshAuthUI();
-    await loadCloudState();   // ✅ now valid
-    renderWeek();
-    renderMonth();
+  supabase.auth.onAuthStateChange((_event, _session) => {
+    // Only one call; refreshAuthUI() will render the topbar.
+    refreshAuthUI();
   });
 
   // Kick off
