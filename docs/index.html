@@ -1314,29 +1314,29 @@ window.getSchedulePayload = () => ({
   }
 
 // --- signout ---
-async function doSignOut(source = 'unknown') {
+async function doSignOut(source = 'manual') {
   try {
-    console.log(`[signout] from: ${source}`);
+    console.log('[signout] from:', source);
 
-    // 1) Ask Supabase to revoke + clear tokens
-    const { error } = await supabase.auth.signOut({ scope: 'global' });
+    // 1) Sign out (local scope is usually enough)
+    const { error } = await supabase.auth.signOut(); // or { scope: 'global' } if you truly want all devices
     if (error) throw error;
 
-    // 2) Make sure we don't fall back to guest automatically
+    // 2) Never auto-fall back to guest
     localStorage.removeItem('barber_guest_mode');
 
-    // 3) Nuke any stray SB auth tokens (belt & suspenders)
-    Object.keys(localStorage)
-      .filter(k => k.startsWith('sb-') || k.includes('supabase'))
-      .forEach(k => localStorage.removeItem(k));
-
-    // 4) Force UI right now (don’t wait for the async event)
+    // 3) Force the UI now (don’t wait for the auth event)
     setAuthScreen(true);
-    forceTopbarSignedOut();
+    await renderTopbar();     // <<< this was the missing piece for you
 
-    // 5) Sanity: confirm we’re really signed out
+    // 4) (Optional) deep clean ONLY if you see a stuck session
+    // Object.keys(localStorage)
+    //   .filter(k => k.startsWith('sb-') || k.includes('supabase'))
+    //   .forEach(k => localStorage.removeItem(k));
+
+    // 5) Sanity log
     const { data: { session } } = await supabase.auth.getSession();
-    console.log('[signout] session after signOut:', session); // should be null
+    console.log('[signout] session is now:', session); // should be null
   } catch (e) {
     console.error('[signout] error', e);
     alert('Sign out failed: ' + (e?.message || e));
