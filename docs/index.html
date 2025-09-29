@@ -646,11 +646,25 @@ function msg(text){ if (authMsg) authMsg.textContent = text || ''; }
 
 /* ========= SHOW/HIDE AUTH ========= */
 function setAuthScreen(visible){
-  if (!appRoot || !authView) return;
-  console.debug('[auth] setAuthScreen ->', visible);
+  const appRoot = document.querySelector('.app');
+  const authView = document.getElementById('authView');
+  if (!appRoot || !authView){
+    console.error('[auth] setAuthScreen: missing nodes', {appRoot: !!appRoot, authView: !!authView});
+    return;
+  }
+  console.debug('[auth] setAuthScreen ->', visible, {
+    before: getComputedStyle(authView).display,
+    inlineBefore: authView.style.display
+  });
+
   authView.style.display   = visible ? 'flex' : 'none';
   appRoot.style.filter     = visible ? 'blur(4px)' : 'none';
   appRoot.style.pointerEvents = visible ? 'none' : 'auto';
+
+  console.debug('[auth] setAuthScreen applied', {
+    after: getComputedStyle(authView).display,
+    inlineAfter: authView.style.display
+  });
 }
 
 /* ========= TOPBAR ========= */
@@ -736,15 +750,23 @@ async function renderTopbar(){
 
 /* ========= CENTRAL AUTH REFRESH ========= */
 async function refreshAuthUI(){
-  const { data: { session }, error } = await supabase.auth.getSession();
-  const hasSession = !!session;
-  const isGuest = localStorage.getItem('barber_guest_mode') === 'true';
-  console.debug('[auth] refreshAuthUI ->', { hasSession, isGuest, error });
+  try{
+    const { data: { session }, error } = await supabase.auth.getSession();
+    if (error) console.warn('[auth] getSession error:', error);
+    const hasSession = !!session;
+    const isGuest = localStorage.getItem('barber_guest_mode') === 'true';
+    const shouldShow = !hasSession && !isGuest;
 
-  // Only show modal if NOT logged in AND NOT guest
-  setAuthScreen(!hasSession && !isGuest);
+    console.debug('[auth] refreshAuthUI', {
+      hasSession, isGuest, shouldShow,
+      sessionUser: session?.user?.email || null
+    });
 
-  await renderTopbar();
+    setAuthScreen(shouldShow);
+    await renderTopbar();
+  }catch(e){
+    console.error('[auth] refreshAuthUI crashed:', e);
+  }
 }
 
 /* ========= BUTTON HANDLERS ========= */
