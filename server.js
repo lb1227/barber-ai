@@ -32,7 +32,7 @@ const OPENAI_REALTIME_MODEL =
 const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN;
-const ENFORCE_FIXED_GREETING = false; // disable for per-account greetings
+const ENFORCE_FIXED_GREETING = true; // disable for per-account greetings
 let CURRENT_NEXT_TURN_PROMPT = "";
 let ASSISTANT_INSTRUCTIONS = "";
 
@@ -431,6 +431,7 @@ function buildTools(cfg = {}) {
   ];
 }
 
+
 // ---------- Main bridge ----------
 wss.on("connection", (twilioWS) => {
   console.log("[Twilio] connected");
@@ -750,6 +751,20 @@ function buildNextTurnPrompt(cfg = {}) {
     }
   }
 
+  function primeTwilioStreamWithSilence() {
+    if (!twilioReady || !streamSid) return;
+    // μ-law "silence" is 0xFF; 20ms frame @ 8kHz is 160 bytes
+    const FRAME = Buffer.alloc(160, 0xFF);
+    // Send ~200ms of silence (10 frames)
+    for (let i = 0; i < 10; i++) {
+      safeSendTwilio({
+        event: "media",
+        streamSid,
+        media: { payload: FRAME.toString("base64") }
+      });
+    }
+  }
+
   // ---------- handling appointments ----------
  async function handleBookAppointment(args, cfg = {}) {
   const required = cfg.required_fields || ["customer_name","service","start_iso","phone","address"];
@@ -792,6 +807,8 @@ function buildNextTurnPrompt(cfg = {}) {
   }
 }
 
+
+  
   // ---------- OpenAI socket ----------
   openaiWS.on("open", () => {
     console.log("[OpenAI] WS open]");
@@ -1104,6 +1121,7 @@ function buildNextTurnPrompt(cfg = {}) {
     if (msg.event === "start") {
       streamSid = msg.start.streamSid;
       twilioReady = true;
+      primeTwilioStreamWithSilence();
 
       const callSid = msg.start?.callSid;
       startTwilioRecording(callSid).catch(console.error);
@@ -1149,7 +1167,7 @@ function buildNextTurnPrompt(cfg = {}) {
         response: {
           modalities: ["audio", "text"],
           conversation: "auto",
-          instructions: userCfg.greeting || "Thank you for calling—how can I help you today?"
+          instructions: `Say exactly: "${userCfg.greeting || "Thank you for calling, how can I help you today?"}"`,
         }
       });
     
