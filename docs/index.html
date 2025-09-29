@@ -1199,6 +1199,51 @@ window.getSchedulePayload = () => ({
   const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJmb2RiemJla2Vsd212anNudGRhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTkxMDk2OTQsImV4cCI6MjA3NDY4NTY5NH0.yggTGamGf69NeToTDDvjHRycXbLERfkaFowK-Q1a6-s";
   console.log('supabase global?', !!window.supabase); // should log true
   const supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+   // --- HARD DEBUG START ---
+  console.log('[debug] window.supabase exists:', !!window.supabase);
+  console.log('[debug] createClient exists:', !!window.supabase?.createClient);
+
+  // If supabase failed to load, bail early with a loud message.
+  if (!window.supabase?.createClient) {
+    const m = 'Supabase UMD not loaded. Check the script URL or adblock.';
+    console.error('[debug]', m);
+    alert(m);
+  }
+
+  // Check DOM hook-ups for auth elements
+  const _btnIn  = document.getElementById('btnSignIn');
+  const _btnUp  = document.getElementById('btnSignUp');
+  const _email  = document.getElementById('authEmail');
+  const _pass   = document.getElementById('authPassword');
+  console.log('[debug] found elements:', { _btnIn: !!_btnIn, _btnUp: !!_btnUp, _email: !!_email, _pass: !!_pass });
+
+  // Add a guaranteed global click logger so we know clicks fire at all
+  document.addEventListener('click', (e) => {
+    if (e.target?.id) console.log('[debug] click on #'+e.target.id);
+  });
+
+  // Force-open the auth modal once on load so we can test the inner buttons
+  (function forceOpenAuthOnce(){
+    const authView = document.getElementById('authView');
+    if (authView) {
+      authView.style.display = 'flex';
+      document.querySelector('.app').style.filter = 'blur(4px)';
+      document.querySelector('.app').style.pointerEvents = 'none';
+      console.log('[debug] forced auth modal open');
+    }
+  })();
+
+  // Wrap Supabase getSession to see errors
+  (async () => {
+    try {
+      const test = await supabase.auth.getSession();
+      console.log('[debug] getSession ok:', !!test?.data?.session);
+    } catch (err) {
+      console.error('[debug] getSession error:', err);
+      alert('getSession failed (see console). Likely Supabase not loaded or blocked.');
+    }
+  })();
+  // --- HARD DEBUG END ---
 </script>
 
 <script>
