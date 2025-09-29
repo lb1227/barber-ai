@@ -1305,7 +1305,6 @@ window.getSchedulePayload = () => ({
       <button class="btn small" id="tbSignIn">Sign In</button>
       <button class="btn small secondary" id="tbSignUp">Sign Up</button>
     `;
-    // wire the buttons to open the auth modal
     document.getElementById("tbSignIn")?.addEventListener("click", () => {
       document.getElementById("authView").style.display = "flex";
     });
@@ -1317,20 +1316,27 @@ window.getSchedulePayload = () => ({
 // --- signout ---
 async function doSignOut(source = 'unknown') {
   try {
-    console.log(`[signout] clicked from: ${source}`);
-    const { error } = await supabase.auth.signOut(); // v2 SDK
+    console.log(`[signout] from: ${source}`);
+
+    // 1) Ask Supabase to revoke + clear tokens
+    const { error } = await supabase.auth.signOut({ scope: 'global' });
     if (error) throw error;
 
-    // No ghost guest mode
+    // 2) Make sure we don't fall back to guest automatically
     localStorage.removeItem('barber_guest_mode');
 
-    // Re-render immediately, then the auth state listener will fire too
+    // 3) Nuke any stray SB auth tokens (belt & suspenders)
+    Object.keys(localStorage)
+      .filter(k => k.startsWith('sb-') || k.includes('supabase'))
+      .forEach(k => localStorage.removeItem(k));
+
+    // 4) Force UI right now (don’t wait for the async event)
     setAuthScreen(true);
     forceTopbarSignedOut();
 
-    // sanity: check session really gone
+    // 5) Sanity: confirm we’re really signed out
     const { data: { session } } = await supabase.auth.getSession();
-    console.log('[signout] session after signOut:', session);
+    console.log('[signout] session after signOut:', session); // should be null
   } catch (e) {
     console.error('[signout] error', e);
     alert('Sign out failed: ' + (e?.message || e));
@@ -1393,6 +1399,10 @@ async function doSignOut(source = 'unknown') {
         `}
       </div>
     `;
+
+
+    document.getElementById('acctSignOut')?.addEventListener('click', () => doSignOut('account-page'));
+    document.getElementById('miSignOut')?.addEventListener('click', () => doSignOut('topbar-menu'));
 
     // Toggle menu
     const btn = document.getElementById('acctBtn');
