@@ -713,7 +713,9 @@ async function saveCloudState() {
     .upsert({ user_id: user.id, data: payload });
 }
 
-// Replace your old save() with:
+function saveLocalOnly(){
+  localStorage.setItem(storeKey, JSON.stringify(state));
+}
 function save() {
   localStorage.setItem("barber_gui_state_v1", JSON.stringify(state));
   // Push to cloud too
@@ -1393,10 +1395,10 @@ window.getSchedulePayload = () => ({
     await renderTopbar();
   }
 
-  supabase.auth.onAuthStateChange((_event, _session) => {
-    // Only one call; refreshAuthUI() will render the topbar.
-    refreshAuthUI();
-    await loadCloudState();   // <— this pulls their saved schedule
+  supabase.auth.onAuthStateChange(async (_event, session) => {
+    if (session) localStorage.removeItem('barber_guest_mode');
+    await refreshAuthUI();
+    await loadCloudState();   // ✅ now valid
     renderWeek();
     renderMonth();
   });
