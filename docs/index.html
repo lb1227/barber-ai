@@ -837,9 +837,11 @@ btnUp?.addEventListener('click', async () => {
 
 /* ========= AUTH STATE LISTENER ========= */
 supabase.auth.onAuthStateChange(async (_event, session) => {
-  if (session) localStorage.removeItem('barber_guest_mode');
+  if (session) {
+    localStorage.removeItem('barber_guest_mode');
+    await loadCloudState();  // now safe, guarded
+  }
   await refreshAuthUI();
-  await loadCloudState?.();
   window.renderWeek?.(); window.renderMonth?.();
 });
 
