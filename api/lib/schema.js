@@ -1,4 +1,4 @@
-import { z } from 'zod';
+import { z } from "zod";
 
 export const receptionistConfigSchema = z.object({
   name: z.string().min(1).max(100),
@@ -8,5 +8,5 @@ export const receptionistConfigSchema = z.object({
   barge_in: z.boolean(),
   end_silence_ms: z.number().min(200).max(5000),
   timezone: z.string().min(1).max(100),
-  phone: z.string().max(40).optional().default(''),
+  phone: z.string().max(40).optional().default(""),
 });
