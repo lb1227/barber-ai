@@ -1133,7 +1133,7 @@ function buildNextTurnPrompt(cfg = {}) {
       console.log("[/media start] customParameters =", startParams, "userId =", userId ?? "default");
     
       // Load per-account config
-      let userCfg = null;
+      userCfg = null;
       if (userId) {
         try { userCfg = await getConfigForUser(userId); } catch (e) { console.warn(e); }
       }
@@ -1147,6 +1147,8 @@ function buildNextTurnPrompt(cfg = {}) {
       CURRENT_NEXT_TURN_PROMPT = buildNextTurnPrompt(userCfg);
       const ASSISTANT_INSTRUCTIONS = buildAssistantInstructions(userCfg);
       const TOOLS = buildTools(userCfg);
+
+      primeTwilioStreamWithSilence();
     
       // Session update
       safeSendOpenAI({
