@@ -1172,7 +1172,7 @@ function buildNextTurnPrompt(cfg = {}) {
         response: {
           modalities: ["audio","text"],
           conversation: "auto",
-          instructions: userCfg.greeting || "Thank you for calling—how can I help you today?"
+          instructions: `Say exactly: '${userCfg.greeting || "Thank you for calling—how can I help you today?"}'`
         }
       });
     
