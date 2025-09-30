@@ -32,7 +32,7 @@ const OPENAI_REALTIME_MODEL =
 const BASE_URL = process.env.BASE_URL || "https://barber-ai.onrender.com";
 const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID;
 const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN;
-const ENFORCE_FIXED_GREETING = true; // disable for per-account greetings
+const ENFORCE_FIXED_GREETING = false; // disable for per-account greetings
 let CURRENT_NEXT_TURN_PROMPT = "";
 let ASSISTANT_INSTRUCTIONS = "";
 
@@ -1163,7 +1163,8 @@ function buildNextTurnPrompt(cfg = {}) {
           instructions: ASSISTANT_INSTRUCTIONS,
         }
       });
-    
+
+      console.log("greeting coming");
       // Send greeting
       greetingInFlight = true;
       safeSendOpenAI({
